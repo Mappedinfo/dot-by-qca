@@ -1,0 +1,5 @@
+- id: tool-fs
+  disabled: false
+- insert:
+    - id: qoder-dot-workspace-guard
+      name: './dsh-workspace-guard.mjs'

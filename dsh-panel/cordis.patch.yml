@@ -1,0 +1,3 @@
+- insert:
+    - id: qoder-dot-panel
+      name: '@mappedinfo/dsh-qoder-dot'

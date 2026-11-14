@@ -1,0 +1,15 @@
+- id: acp
+  inject: [acpAppStartup]
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+- id: tool-bash
+  disabled: false
+  config:
+    enableRunInBackground: false
+    promoteOnTimeout: false
+- id: tool-fs
+  disabled: true
+- insert:
+    - id: qoder-dot-command-approval
+      name: './dsh-command-approval.mjs'
