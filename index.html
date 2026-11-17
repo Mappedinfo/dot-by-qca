@@ -10,17 +10,20 @@
   <body>
     <header class="topbar">
       <div class="topbar-inner">
-        <h1>Dot by QCA</h1>
+        <h1 class="brand-planet" title="Dot by QCA">
+          <img id="brand-planet" src="/dot-planet.png" alt="Dot by QCA" width="40" height="40">
+          <canvas id="generated-planet" width="144" height="144" role="img" aria-label="Dot by QCA 星球" hidden></canvas>
+        </h1>
         <nav aria-label="Dot 页面">
-          <button id="chat-tab" class="tab" type="button" aria-pressed="true">对话</button>
-          <button id="tasks-tab" class="tab" type="button" aria-pressed="false" hidden>任务本</button>
-          <button id="memory-tab" class="tab" type="button" aria-pressed="false" hidden>记忆</button>
-          <button id="settings-tab" class="tab" type="button" aria-pressed="false" hidden>设置</button>
+          <button id="chat-tab" class="tab" type="button" aria-pressed="true" aria-controls="chat-view">对话</button>
+          <button id="tasks-tab" class="tab" type="button" aria-pressed="false" aria-controls="tasks-view" hidden>任务本</button>
+          <button id="memory-tab" class="tab" type="button" aria-pressed="false" aria-controls="memory-view" hidden>记忆</button>
+          <button id="settings-tab" class="tab" type="button" aria-pressed="false" aria-controls="settings-view">设置</button>
         </nav>
         <div class="topbar-actions">
           <span class="status" id="status" role="status">正在连接</span>
           <button id="stop" class="secondary" type="button" hidden>停止当前轮</button>
-          <a id="cloud-link" target="_blank" rel="noopener noreferrer" hidden>Qoder 网页</a>
+          <a id="cloud-link" target="_blank" rel="noopener noreferrer" aria-label="在 Qoder 打开当前会话（新标签页）" hidden>在 Qoder 打开 <span aria-hidden="true">↗</span></a>
         </div>
       </div>
     </header>
@@ -36,75 +39,181 @@
           <span id="project-status" role="status" hidden></span>
         </div>
         <p id="task-status" role="status" hidden></p>
-        <details class="session-details"><summary>会话详情</summary><code id="session-id"></code></details>
         <p id="project-error" class="issue" role="alert" hidden></p>
         <p id="notice" role="status"></p>
-        <button type="button" id="start" hidden>创建主会话</button>
       </section>
-      <section id="transcript" tabindex="0" class="transcript" aria-label="会话消息" aria-live="polite"></section>
+      <div class="chat-stage">
+        <section id="transcript" tabindex="0" class="transcript" aria-label="会话消息" aria-live="polite"></section>
+        <section id="chat-empty" class="chat-empty" aria-labelledby="chat-empty-title" hidden>
+          <h2 id="chat-empty-title"></h2>
+          <button type="button" id="start" hidden>创建主会话</button>
+        </section>
+      </div>
       <div class="chat-footer">
-        <section id="approvals" aria-label="Mac 操作审批" aria-live="polite"></section>
+        <section id="approvals" aria-label="待处理审批" aria-live="polite"></section>
         <form id="composer" class="composer" hidden>
           <div class="compose-row">
             <textarea id="message" aria-label="发给 Dot by QCA" rows="1" maxlength="4000" placeholder="发给 Dot by QCA" required></textarea>
-            <button id="send" type="submit">发送</button>
+            <button id="send" type="submit" title="Enter 发送 · Shift + Enter 换行">发送</button>
           </div>
         </form>
         <p id="issue" class="issue" role="alert" hidden></p>
         <button id="reload" class="secondary" type="button" hidden>重新打开页面</button>
       </div>
     </main>
-    <section id="tasks-view" class="memory-view" aria-labelledby="tasks-heading" hidden>
-      <h2 id="tasks-heading">任务本</h2>
-      <p id="tasks-status" class="memory-guide" role="status"></p>
-      <h3 id="followups-heading" hidden>从 Dot 发出的续办</h3>
-      <ul id="followups-list" class="tasks-list"></ul>
-      <ul id="tasks-list" class="tasks-list"></ul>
+    <section id="tasks-view" class="workspace-view" aria-labelledby="tasks-heading" hidden>
+      <header class="view-heading taskbook-heading">
+        <h2 id="tasks-heading">任务本</h2>
+        <p id="tasks-status" class="memory-guide" role="status"></p>
+        <div class="taskbook-filters" role="search" aria-label="搜索任务本">
+          <input id="task-search" type="search" placeholder="搜索任务标题、ID 或回执" aria-label="任务标题、ID 或回执" aria-controls="task-results">
+          <select id="task-type" aria-label="任务类型" aria-controls="task-results">
+            <option value="">全部类型</option>
+            <option value="dot">从 Dot 发出</option>
+            <option value="dsh">DSH 对话</option>
+            <option value="qca">QCA 子线程</option>
+          </select>
+          <select id="task-status-filter" aria-label="任务状态" aria-controls="task-results">
+            <option value="">全部状态</option>
+            <option value="active">进行中</option>
+            <option value="waiting">待处理</option>
+            <option value="completed">已完成</option>
+            <option value="idle">空闲</option>
+            <option value="unconfirmed">未确认</option>
+            <option value="closed">其他已结束</option>
+          </select>
+        </div>
+        <p id="task-results-count" class="task-results-count" role="status"></p>
+      </header>
+      <div id="task-results" class="task-results" tabindex="0" role="region" aria-label="任务搜索结果">
+        <h3 id="followups-heading" hidden>从 Dot 发出的任务</h3>
+        <ul id="followups-list" class="tasks-list"></ul>
+        <h3 id="tasks-list-heading" hidden>DSH 对话与 QCA 子线程</h3>
+        <ul id="tasks-list" class="tasks-list"></ul>
+        <p id="task-no-results" class="memory-guide" hidden>没有符合当前条件的任务。</p>
+      </div>
     </section>
-    <section id="memory-view" class="memory-view" aria-labelledby="memory-heading" hidden>
-      <h2 id="memory-heading">Dot 记忆</h2>
-      <p class="memory-guide">在对话里用「记住 项目偏好 标识：内容」保存条目。</p>
+    <section id="memory-view" class="workspace-view" aria-labelledby="memory-heading" hidden>
+      <header class="view-heading">
+        <h2 id="memory-heading">Dot 记忆</h2>
+        <p class="memory-guide">在对话里用「记住 项目偏好 标识：内容」保存条目。</p>
+      </header>
       <div id="memory-entries" aria-live="polite"></div>
     </section>
-    <section id="settings-view" class="memory-view" aria-labelledby="settings-heading" hidden>
-      <p class="memory-guide">Dot by QCA 是独立第三方项目，与 Qoder Cloud Agents 的提供方无隶属关系，也未获其背书。</p>
-      <h2 id="settings-heading">会话迁移</h2>
-      <p class="memory-guide">复制当前会话生效的 Agent 配置，创建带云端记忆的新会话。旧对话和回执可通过旧会话查看。</p>
-      <section id="migration-result" class="migration-result" aria-label="迁移记录" hidden>
-        <p id="migration-status" role="status"></p>
-        <div class="migration-links">
-          <a id="migration-source" target="_blank" rel="noopener noreferrer">打开旧 Qoder 会话</a>
-          <a id="migration-target" target="_blank" rel="noopener noreferrer" hidden>打开新 Qoder 会话</a>
+    <section id="settings-view" class="workspace-view" aria-labelledby="settings-heading" hidden>
+      <header class="view-heading"><h2 id="settings-heading">设置</h2></header>
+      <fieldset id="theme-options" class="theme-options">
+        <legend>外观</legend>
+        <div class="palette-grid">
+          <label class="palette-option">
+            <input type="radio" name="theme" value="jade" checked>
+            <span class="palette-sample" data-palette="jade" aria-hidden="true"></span>
+            <span>翡翠绿</span>
+          </label>
+          <label class="palette-option">
+            <input type="radio" name="theme" value="dsh">
+            <span class="palette-sample" data-palette="dsh" aria-hidden="true"></span>
+            <span>DSH 蓝</span>
+          </label>
+          <label class="palette-option">
+            <input type="radio" name="theme" value="paper">
+            <span class="palette-sample" data-palette="paper" aria-hidden="true"></span>
+            <span>暖纸</span>
+          </label>
+          <label class="palette-option">
+            <input type="radio" name="theme" value="graphite">
+            <span class="palette-sample" data-palette="graphite" aria-hidden="true"></span>
+            <span>石墨</span>
+          </label>
         </div>
-        <p id="migration-active" class="memory-guide"></p>
-        <button id="migration-switch" class="secondary" type="button" hidden></button>
-        <button id="migration-resume" class="secondary" type="button" hidden>继续这次迁移</button>
+      </fieldset>
+      <section class="settings-section" aria-labelledby="planet-heading">
+        <h3 id="planet-heading">星球</h3>
+        <div class="planet-settings">
+          <div class="planet-preview" aria-hidden="true">
+            <img id="classic-planet-preview" src="/dot-planet.png" alt="" width="112" height="112">
+            <canvas id="generated-planet-preview" width="224" height="224" hidden></canvas>
+          </div>
+          <div class="planet-controls">
+            <label class="planet-field">样式
+              <select id="planet-mode">
+                <option value="classic">经典</option>
+                <option value="generated">程序生成</option>
+              </select>
+            </label>
+            <div id="planet-parameters" hidden>
+              <form id="planet-seed-form" class="planet-seed-form">
+                <label class="planet-field">星球编号
+                  <input id="planet-seed" type="number" min="0" max="4294967295" step="1" required>
+                </label>
+                <button type="submit" class="secondary">按编号生成</button>
+                <button id="planet-random" type="button" class="secondary">随机一颗</button>
+              </form>
+              <div class="planet-fields">
+                <label class="planet-field">纹理
+                  <select id="planet-texture">
+                    <option value="bands">矿物纹带</option>
+                    <option value="swirls">云层涡纹</option>
+                    <option value="craters">陨石坑</option>
+                  </select>
+                </label>
+                <label class="planet-field planet-color">主色
+                  <input id="planet-color" type="color">
+                </label>
+                <label class="planet-field">阴影
+                  <input id="planet-shadow" type="range" min="0" max="100">
+                </label>
+              </div>
+              <div class="planet-switches">
+                <label><input id="planet-ring" type="checkbox" role="switch">星环</label>
+                <label><input id="planet-glint" type="checkbox" role="switch">闪光</label>
+                <label><input id="planet-moon" type="checkbox" role="switch">小卫星</label>
+                <label><input id="planet-motion" type="checkbox" role="switch">自转与动画</label>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
-      <form id="migration-form" class="migration-form">
-        <label for="migration-name">新 Agent 名称</label>
-        <input id="migration-name" name="name" maxlength="100" required value="Dot by QCA">
-        <label for="migration-handoff">交接说明（可选）</label>
-        <textarea id="migration-handoff" name="handoff" rows="4" maxlength="6000" placeholder="填入可以存到 Qoder 云端的项目进度、已确认决定或后续任务"></textarea>
-        <label for="migration-access">新会话的云端记忆权限</label>
-        <select id="migration-access">
-          <option value="inherit">沿用原权限，新建记忆库默认只读</option>
-          <option value="read_only">只读</option>
-          <option value="read_write">允许 Qoder 读写云端记忆</option>
-        </select>
-        <label class="migration-checkbox"><input id="migration-memory" type="checkbox"> 将当前 Mac 上的 MEMORY.md 快照上传到 Qoder 云端</label>
-        <label class="migration-checkbox"><input id="migration-worker" type="checkbox"> 为新会话配置 Dot 云端助手</label>
-        <button id="migration-create" type="submit">一键创建迁移副本</button>
-      </form>
-      <p id="migration-error" class="issue" role="alert" hidden></p>
-      <details id="migration-history" class="migration-history" hidden>
-        <summary>以前的迁移</summary>
-        <ul></ul>
-      </details>
-      <section class="agent-maintenance" aria-labelledby="agent-maintenance-heading">
+      <section id="session-settings" class="settings-section" aria-labelledby="migration-heading" hidden>
+        <h3 id="migration-heading">会话迁移</h3>
+        <p class="memory-guide">复制当前会话生效的 Agent 配置，创建带云端记忆的新会话。旧对话和回执可通过旧会话查看。</p>
+        <section id="migration-result" class="migration-result" aria-label="迁移记录" hidden>
+          <p id="migration-status" role="status"></p>
+          <div class="migration-links">
+            <a id="migration-source" target="_blank" rel="noopener noreferrer">打开旧 Qoder 会话</a>
+            <a id="migration-target" target="_blank" rel="noopener noreferrer" hidden>打开新 Qoder 会话</a>
+          </div>
+          <p id="migration-active" class="memory-guide"></p>
+          <button id="migration-switch" class="secondary" type="button" hidden></button>
+          <button id="migration-resume" class="secondary" type="button" hidden>继续这次迁移</button>
+        </section>
+        <form id="migration-form" class="migration-form">
+          <label for="migration-name">新 Agent 名称</label>
+          <input id="migration-name" name="name" maxlength="100" required value="Dot by QCA">
+          <label for="migration-handoff">交接说明（可选）</label>
+          <textarea id="migration-handoff" name="handoff" rows="4" maxlength="6000" placeholder="填入可以存到 Qoder 云端的项目进度、已确认决定或后续任务"></textarea>
+          <label for="migration-access">新会话的云端记忆权限</label>
+          <select id="migration-access">
+            <option value="inherit">沿用原权限，新建记忆库默认只读</option>
+            <option value="read_only">只读</option>
+            <option value="read_write">允许 Qoder 读写云端记忆</option>
+          </select>
+          <label class="migration-checkbox"><input id="migration-memory" type="checkbox"> 将当前 Mac 上的 MEMORY.md 快照上传到 Qoder 云端</label>
+          <label class="migration-checkbox"><input id="migration-worker" type="checkbox"> 为新会话配置 Dot 云端助手</label>
+          <button id="migration-create" type="submit">一键创建迁移副本</button>
+        </form>
+        <p id="migration-error" class="issue" role="alert" hidden></p>
+        <details id="migration-history" class="migration-history" hidden>
+          <summary>以前的迁移</summary>
+          <ul></ul>
+        </details>
+      </section>
+      <section id="agent-maintenance" class="settings-section" aria-labelledby="agent-maintenance-heading" hidden>
         <h3 id="agent-maintenance-heading">Agent 配置</h3>
         <button id="update-agent" class="secondary" type="button">检查并修复 Dot 配置</button>
         <p id="update-agent-status" class="memory-guide" role="status"></p>
       </section>
+      <p class="settings-footnote">Dot by QCA 是独立第三方项目，与 Qoder Cloud Agents 的提供方无隶属关系，也未获其背书。</p>
     </section>
   </body>
 </html>

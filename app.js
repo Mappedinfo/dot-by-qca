@@ -1,29 +1,53 @@
 import { markdownContent } from './markdown.js'
+import { initPlanet } from './planet.js'
 
 const byId = id => document.getElementById(id)
+const setPlanetPreviewVisible = initPlanet()
+
 const ui = Object.fromEntries([
-  'status', 'stop', 'session-id', 'cloud-link', 'project-picker', 'project', 'notice', 'start', 'transcript', 'approvals', 'composer', 'message', 'send', 'issue', 'reload',
+  'status', 'stop', 'cloud-link', 'project-picker', 'project', 'notice',
+  'start', 'chat-empty', 'chat-empty-title', 'transcript', 'approvals', 'composer', 'message', 'send', 'issue', 'reload',
   'chat-tab', 'memory-tab', 'chat-view', 'memory-view', 'memory-entries', 'task-status',
-  'settings-tab', 'settings-view', 'migration-form', 'migration-name', 'migration-handoff', 'migration-memory',
+  'settings-tab', 'settings-view', 'theme-options', 'session-settings', 'migration-form', 'migration-name', 'migration-handoff', 'migration-memory',
   'migration-result', 'migration-status', 'migration-active', 'migration-source', 'migration-target',
   'migration-create', 'migration-resume', 'migration-switch', 'migration-error', 'migration-access', 'migration-history',
   'project-status', 'project-error',
-  'tasks-tab', 'tasks-view', 'tasks-status', 'tasks-list',
+  'tasks-tab', 'tasks-view', 'tasks-status', 'tasks-list-heading', 'tasks-list',
+  'task-search', 'task-type', 'task-status-filter', 'task-results', 'task-results-count', 'task-no-results',
   'followups-heading', 'followups-list',
   'migration-worker',
-  'update-agent', 'update-agent-status',
+  'agent-maintenance', 'update-agent', 'update-agent-status',
 ].map(id => [id, byId(id)]))
-const names = {
-  'user.message': '我',
-  'agent.message': 'Dot by QCA',
+
+const themeKey = 'dot-by-qca-theme'
+const themeOptions = [...ui['theme-options'].querySelectorAll('input')]
+let savedTheme
+try { savedTheme = localStorage.getItem(themeKey) } catch {}
+const initialTheme = themeOptions.find(option => option.value === savedTheme) || themeOptions[0]
+initialTheme.checked = true
+document.documentElement.dataset.theme = initialTheme.value
+ui['theme-options'].addEventListener('change', event => {
+  const theme = event.target.value
+  document.documentElement.dataset.theme = theme
+  try { localStorage.setItem(themeKey, theme) } catch {}
+})
+
+const recordLabels = {
   'question.answer': '确认记录',
   'question.card': '历史审批',
   'memory.result': '记忆操作',
   'dsh.status': 'Mac 任务状态',
   'dsh.review': 'Mac 独立审查',
-  'agent.tool_result': 'Qoder 云端工具',
   'user.custom_tool_result': 'Mac 操作回执',
 }
+const cloudToolLabels = new Map([
+  ['create_agent', '创建云端子线程'],
+  ['Bash', '运行命令'],
+  ['Read', '读取文件'],
+  ['Glob', '查找文件'],
+  ['Write', '写入文件'],
+  ['Edit', '编辑文件'],
+])
 const phases = { idle: '可发送', running: '处理中', approval: '等待审批', stopping: '正在停止', ended: '会话已结束' }
 let state
 let working = false
@@ -32,6 +56,7 @@ let syncError
 let actionError
 let draft
 const renderedMessages = new Set()
+const pendingReplyBadges = new Map()
 let readingPosition
 let renderedSessionId
 let migrationRequestId
@@ -43,6 +68,7 @@ let projectCatalog
 let pendingProject
 let projectError
 let taskbookRefresh
+let taskbook
 let renderedTasks
 let dshParentOrigin
 
@@ -70,6 +96,94 @@ function element(tag, text, className) {
   node.textContent = text
   if (className) node.className = className
   return node
+}
+
+function cloudToolInfo(summary) {
+  const prefix = 'Qoder 云端 · '
+  const name = summary?.startsWith(prefix) ? summary.slice(prefix.length) : ''
+  return { name, label: cloudToolLabels.get(name) || name || summary || '云端工具' }
+}
+
+function cloudToolOutput(name, text) {
+  const threadId = name === 'create_agent' && text.match(/^Created agent thread:[ \t]+(sthr_[a-zA-Z0-9_-]+)\s*$/)?.[1]
+  if (!threadId) return element('pre', text)
+
+  const receipt = element('div', '', 'thread-receipt')
+  const id = element('code', threadId)
+  const copy = element('button', '复制 ID', 'copy-thread')
+  copy.type = 'button'
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(threadId)
+      copy.textContent = '已复制'
+    } catch {
+      document.getSelection()?.selectAllChildren(id)
+      copy.textContent = '请手动复制'
+    }
+  })
+  receipt.append(element('span', '已创建', 'thread-created'), id, copy)
+  return receipt
+}
+
+function appendMessage(transcript, message) {
+  const item = element('article', '', 'message')
+  item.dataset.kind = message.type
+  if (message.type === 'question.card') item.dataset.approval = message.id
+
+  if (message.type === 'agent.message' || message.type === 'user.message') {
+    const author = message.type === 'agent.message' ? 'Dot' : '我'
+    const heading = element('div', author, 'message-author')
+    if (message.type === 'agent.message') {
+      const completion = element('span', '回复完成', 'reply-completed')
+      completion.hidden = !message.replyCompleted
+      if (completion.hidden) pendingReplyBadges.set(message.id, completion)
+      heading.append(completion)
+    }
+    item.append(heading, markdownContent(message.text))
+  } else if (message.type === 'agent.tool_result') {
+    const { name, label } = cloudToolInfo(message.summary)
+    const previous = transcript.lastElementChild
+    const output = cloudToolOutput(name, message.text)
+    if (name && previous?.dataset.cloudTool === name) {
+      const entries = previous.querySelector('.record-entries')
+      entries.append(output)
+      const count = previous.querySelector('.record-count')
+      count.textContent = entries.childElementCount + ' 条'
+      count.hidden = false
+      return
+    }
+
+    item.dataset.cloudTool = name
+    const detail = element('details', '', 'record')
+    const summary = element('summary', '')
+    const count = element('span', '', 'record-count')
+    count.hidden = true
+    summary.append(element(name && name === label ? 'code' : 'span', label, 'record-label'),
+      element('span', 'Qoder 云端'), count, recordToggle())
+    const entries = element('div', '', 'record-entries')
+    entries.tabIndex = 0
+    entries.setAttribute('role', 'region')
+    entries.setAttribute('aria-label', label + '的工具输出')
+    entries.append(output)
+    detail.append(summary)
+    if (name && name !== label) detail.append(element('code', name, 'record-tool'))
+    detail.append(entries)
+    item.append(detail)
+  } else {
+    const detail = element('details', '', 'record')
+    const summary = element('summary', '')
+    summary.append(element('span', message.summary || recordLabels[message.type] || '操作记录'), recordToggle())
+    detail.append(summary, element('p', message.text, 'record-text'))
+    item.append(detail)
+  }
+  transcript.append(item)
+}
+
+function recordToggle() {
+  const toggle = element('span', '', 'record-toggle')
+  toggle.setAttribute('aria-hidden', 'true')
+  toggle.append(element('span', '查看'), element('span', '收起'))
+  return toggle
 }
 
 function browserRequestError(message, code) {
@@ -121,7 +235,12 @@ function renderApprovals(approvals) {
   ui.approvals.replaceChildren(...approvals.map(approval => {
     const card = element('article', '', 'approval')
     if (approval.choices) {
-      card.append(element('h3', approval.title || '待确认'), element('p', approval.text))
+      if (approval.native) {
+        const { name, label } = cloudToolInfo(approval.title)
+        const context = element('div', 'Qoder 云端审批', 'approval-context')
+        if (name && name !== label) context.append(element('code', name))
+        card.append(context, element('h3', label), element('pre', approval.text, 'approval-params'))
+      } else card.append(element('h3', approval.title || '待确认'), element('p', approval.text))
       if (approval.expired) card.append(element('p', '审批已过期。请结束此卡片，再决定是否重新发起任务。', 'issue'))
       const actions = element('div', '', 'actions')
       for (const choice of approval.choices) {
@@ -198,7 +317,8 @@ function cloudUrl(sessionId) {
 
 function renderMigration(disabled) {
   const job = state.migration
-  ui['settings-tab'].hidden = !job
+  ui['session-settings'].hidden = !job
+  ui['agent-maintenance'].hidden = !job
   if (!job) return
   ui['update-agent'].disabled = disabled || state.phase !== 'idle' || job.running
   const updated = state.consoleUpdate?.sessionId === state.sessionId && state.consoleUpdate
@@ -259,6 +379,7 @@ function render() {
   ui.reload.hidden = !['login', 'gateway'].includes(requestError?.code)
   if (!state) {
     ui.status.textContent = syncError ? '连接失败' : '正在连接'
+    ui.status.dataset.phase = syncError ? 'error' : 'connecting'
     renderProject(true)
     return
   }
@@ -269,6 +390,9 @@ function render() {
     : { connecting: '正在连接', reconnecting: '正在重连' }[state.cloudConnection] || sessionStatus
   const disabled = actionsUnavailable()
   ui.status.textContent = `${source} · ${connection}`
+  ui.status.dataset.phase = syncError ? 'error'
+    : ['connecting', 'reconnecting'].includes(state.cloudConnection) ? state.cloudConnection
+      : state.sessionId ? state.phase : 'unconfigured'
   ui['memory-tab'].hidden = !state.consoleMode
   ui['tasks-tab'].hidden = !state.consoleMode
   renderMigration(disabled)
@@ -278,7 +402,8 @@ function render() {
   ui['task-status'].hidden = !taskStatus
   ui.stop.hidden = !state.consoleMode || !state.turnId || !['running', 'approval', 'stopping'].includes(state.phase)
   ui.stop.disabled = disabled || state.phase === 'stopping'
-  ui['session-id'].textContent = state.sessionId || ''
+  ui['cloud-link'].hidden = !state.consoleMode || !state.sessionId
+  if (!ui['cloud-link'].hidden) ui['cloud-link'].href = cloudUrl(state.sessionId)
   ui.notice.textContent = !state.configured ? '请在 Mac 配置 QCA PAT，再重启服务。'
     : ''
   ui.start.hidden = Boolean(state.sessionId) || !state.configured
@@ -297,37 +422,36 @@ function render() {
     } else loadDraft(state.sessionId)
     transcript.replaceChildren()
     renderedMessages.clear()
+    pendingReplyBadges.clear()
     readingPosition = undefined
     renderedSessionId = state.sessionId
   }
   const activeApprovals = new Set(state.approvals.map(approval => approval.id))
+  ui['chat-empty'].hidden = !state.configured || state.messages.length > 0 || activeApprovals.size > 0
+  ui['chat-empty-title'].textContent = state.sessionId ? '今天想聊些什么？' : '开始使用 Dot'
   const readingChat = !ui['chat-view'].hidden
   const height = transcript.clientHeight
   const nearBottom = readingChat && transcript.scrollHeight - transcript.scrollTop - height < 40
   const firstRender = renderedMessages.size === 0
   const newMessages = state.messages.filter(message => !renderedMessages.has(message.id))
   for (const message of newMessages) {
-    const item = element('article', '', 'message')
-    item.dataset.kind = message.type
-    if (message.type === 'question.card') item.dataset.approval = message.id
-    if (['user.message', 'agent.message'].includes(message.type)) {
-      item.append(element('h3', names[message.type]), markdownContent(message.text))
-    } else {
-      const detail = element('details', '')
-      detail.append(element('summary', message.summary || names[message.type] || '操作记录'), element('p', message.text))
-      item.append(detail)
-    }
-    transcript.append(item)
+    appendMessage(transcript, message)
     renderedMessages.add(message.id)
+  }
+  if (pendingReplyBadges.size) {
+    for (const message of state.messages) {
+      if (!message.replyCompleted) continue
+      const completion = pendingReplyBadges.get(message.id)
+      if (completion) {
+        completion.hidden = false
+        pendingReplyBadges.delete(message.id)
+      }
+    }
   }
   for (const item of transcript.querySelectorAll('[data-approval]')) item.hidden = activeApprovals.has(item.dataset.approval)
   renderApprovals(state.approvals)
   if (readingChat && (nearBottom || firstRender) && (newMessages.length || height !== transcript.clientHeight)) {
     transcript.scrollTop = transcript.scrollHeight
-  }
-  if (state.consoleMode && state.sessionId) {
-    ui['cloud-link'].href = cloudUrl(state.sessionId)
-    ui['cloud-link'].hidden = false
   }
 }
 
@@ -341,60 +465,108 @@ function showPage(page) {
     ui[name + '-tab'].setAttribute('aria-pressed', String(name === page))
     ui[name + '-view'].hidden = name !== page
   }
+  setPlanetPreviewVisible(page === 'settings')
   if (page === 'chat' && readingPosition !== undefined) {
     ui.transcript.scrollTop = readingPosition === 'latest' ? ui.transcript.scrollHeight : readingPosition
     readingPosition = undefined
   }
 }
 
+const taskLabels = { running: '运行中', waiting: '等你处理', idle: '空闲', archived: '已归档', completed: '已完成',
+  failed: '失败', cancelled: '已取消', unknown: '状态未确认', sending: '正在投递', queued: '已投递',
+  unconfirmed: '状态未确认', not_run: '未执行', expired: '审批已过期' }
+const taskStatusGroups = {
+  active: ['running', 'sending', 'queued'],
+  waiting: ['waiting'],
+  completed: ['completed'],
+  idle: ['idle'],
+  unconfirmed: ['unknown', 'unconfirmed'],
+  closed: ['failed', 'cancelled', 'archived', 'not_run', 'expired'],
+}
+
+function renderTaskbook(resetScroll = false) {
+  if (!taskbook) return
+  const { tasks, followups = [], cloudFollowups = [], macRuns = [] } = taskbook
+  const query = ui['task-search'].value.trim().toLowerCase()
+  const type = ui['task-type'].value
+  const statusFilter = ui['task-status-filter'].value
+  const signature = JSON.stringify([tasks, followups, cloudFollowups, macRuns, query, type, statusFilter])
+  if (signature === renderedTasks) return
+
+  const matches = (task, category) => (!type || type === category) &&
+    (!statusFilter || taskStatusGroups[statusFilter].includes(task.status)) &&
+    (!query || [task.title, task.id, task.threadId, task.sessionId, task.cloudSessionId, task.receipt]
+      .some(value => typeof value === 'string' && value.toLowerCase().includes(query)))
+  const recent = tasks.filter(task => matches(task, task.provider))
+  const sent = [...followups, ...cloudFollowups, ...macRuns]
+  const active = task => task.status === 'waiting' || taskStatusGroups.active.includes(task.status)
+  const sentMatches = sent.map(task => ({
+    ...task,
+    title: task.threadId ? 'QCA · ' + (task.title || task.threadId)
+      : task.title || tasks.find(item => item.provider === 'dsh' && item.id === task.sessionId)?.title || task.sessionId,
+  })).filter(task => matches(task, 'dot')).sort((a, b) => Number(active(b)) - Number(active(a)) ||
+    (b.finishedAt ?? b.startedAt ?? b.createdAt ?? 0) - (a.finishedAt ?? a.startedAt ?? a.createdAt ?? 0))
+
+  const providers = { dsh: 'Mac DSH', qca: 'QCA' }
+  ui['tasks-list-heading'].hidden = !recent.length
+  ui['tasks-list-heading'].textContent = { dsh: 'DSH 对话', qca: 'QCA 子线程' }[type] || 'DSH 对话与 QCA 子线程'
+  ui['tasks-list'].replaceChildren(...recent.map(task => {
+    const row = element('li', '')
+    if (task.provider === 'dsh' && dshParentOrigin) {
+      const open = element('button', task.title, 'task-name task-open')
+      open.type = 'button'
+      open.addEventListener('click', () => window.parent.postMessage({ type: 'qoder-dot/open-session', id: task.id }, dshParentOrigin))
+      row.append(open)
+    } else if (task.provider === 'qca' && task.cloudSessionId) {
+      const link = element('a', task.title, 'task-name')
+      link.href = cloudUrl(task.cloudSessionId)
+      link.target = '_blank'
+      link.rel = 'noopener noreferrer'
+      row.append(link)
+    } else row.append(element('span', task.title, 'task-name'))
+    const lastObserved = task.lastObservedStatus ? `（上次${taskLabels[task.lastObservedStatus]}）` : ''
+    const status = element('span', providers[task.provider] + ' · ' + taskLabels[task.status] + lastObserved, 'task-state')
+    status.dataset.status = task.status
+    const date = new Date(task.updatedAt)
+    const time = element('time', date.toLocaleString(), 'task-time')
+    time.dateTime = date.toISOString()
+    row.append(status, time)
+    return row
+  }))
+  ui['followups-heading'].hidden = !sentMatches.length
+  ui['followups-list'].replaceChildren(...sentMatches.map(task => {
+    const row = element('li', '')
+    const status = element('span', taskLabels[task.status], 'task-state')
+    status.dataset.status = task.status
+    row.append(element('span', task.title, 'task-name'), status, element('code', task.receipt, 'task-time'))
+    return row
+  }))
+  const count = recent.length + sentMatches.length
+  const total = tasks.length + sent.length
+  ui['task-results-count'].textContent = query || type || statusFilter ? `${count} / ${total} 条` : `${total} 条`
+  const empty = ui['task-no-results']
+  empty.hidden = count > 0
+  empty.textContent = total ? '没有符合当前条件的任务。' : '任务本暂无记录。'
+  if (resetScroll) ui['task-results'].scrollTop = 0
+  renderedTasks = signature
+}
+
+ui['task-search'].addEventListener('input', () => renderTaskbook(true))
+for (const id of ['task-type', 'task-status-filter']) {
+  ui[id].addEventListener('change', () => renderTaskbook(true))
+}
+
 async function refreshTaskbook() {
   if (ui['tasks-view'].hidden || taskbookRefresh) return
   taskbookRefresh = request('/api/taskbook')
   try {
-    const result = await taskbookRefresh
-    const labels = { running: '运行中', waiting: '等你处理', idle: '空闲', archived: '已归档', completed: '已完成',
-      failed: '失败', cancelled: '已取消', unknown: '状态未确认' }
-    const providers = { dsh: 'Mac DSH', qca: 'QCA' }
+    taskbook = await taskbookRefresh
     ui['tasks-status'].textContent = [
-      result.localFresh ? 'Mac DSH 已同步' : 'Mac DSH 状态待同步',
-      result.cloudFresh ? 'QCA 子线程已同步' : 'QCA 子线程状态待同步',
-      result.localOmitted ? '显示 ' + result.tasks.length + ' 条，另有更早的 DSH 对话' : result.tasks.length + ' 条',
+      taskbook.localFresh ? 'Mac DSH 已同步' : 'Mac DSH 状态待同步',
+      taskbook.cloudFresh ? 'QCA 子线程已同步' : 'QCA 子线程状态待同步',
+      ...(taskbook.localOmitted ? ['更早的 DSH 对话未载入'] : []),
     ].join(' · ')
-    const signature = JSON.stringify([result.tasks, result.followups])
-    if (signature === renderedTasks) return
-    ui['tasks-list'].replaceChildren(...result.tasks.map(task => {
-      const row = element('li', '')
-      if (task.provider === 'dsh' && dshParentOrigin) {
-        const open = element('button', task.title, 'task-name task-open')
-        open.type = 'button'
-        open.addEventListener('click', () => window.parent.postMessage({ type: 'qoder-dot/open-session', id: task.id }, dshParentOrigin))
-        row.append(open)
-      } else if (task.provider === 'qca' && task.cloudSessionId) {
-        const link = element('a', task.title, 'task-name')
-        link.href = cloudUrl(task.cloudSessionId)
-        link.target = '_blank'
-        link.rel = 'noopener noreferrer'
-        row.append(link)
-      } else row.append(element('span', task.title, 'task-name'))
-      const status = element('span', providers[task.provider] + ' · ' + labels[task.status], 'task-state')
-      status.dataset.status = task.status
-      const date = new Date(task.updatedAt)
-      const time = element('time', date.toLocaleString(), 'task-time')
-      time.dateTime = date.toISOString()
-      row.append(status, time)
-      return row
-    }))
-    const followups = result.followups || []
-    ui['followups-heading'].hidden = !followups.length
-    ui['followups-list'].replaceChildren(...followups.map(task => {
-      const row = element('li', '')
-      const title = result.tasks.find(item => item.id === task.sessionId && item.provider === 'dsh')?.title || task.sessionId
-      const label = labels[task.status] || { sending: '正在投递', queued: '已投递', unconfirmed: '状态未确认' }[task.status]
-      row.append(element('span', title, 'task-name'), element('span', label, 'task-state'),
-        element('code', task.receipt, 'task-time'))
-      return row
-    }))
-    renderedTasks = signature
+    renderTaskbook()
   } catch (error) {
     ui['tasks-status'].textContent = error.message
   } finally {
@@ -519,6 +691,24 @@ ui.project.addEventListener('change', async () => {
   pendingProject = undefined
   render()
 })
+
+let composing = false
+let composingUntil = 0
+ui.message.addEventListener('compositionstart', () => { composing = true })
+ui.message.addEventListener('compositionend', () => {
+  composing = false
+  // Safari may deliver the candidate-confirming Enter after compositionend.
+  composingUntil = performance.now() + 10
+})
+ui.message.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return
+  if (composing || event.isComposing || event.keyCode === 229 || performance.now() < composingUntil) return
+  event.preventDefault()
+  if (!event.repeat && !ui.send.disabled && ui.message.value.trim()) {
+    ui.composer.requestSubmit(ui.send)
+  }
+})
+
 ui.composer.addEventListener('submit', async event => {
   event.preventDefault()
   const text = ui.message.value.trim()

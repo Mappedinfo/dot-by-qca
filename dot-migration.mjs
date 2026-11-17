@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { QcaError } from './qca.mjs'
-import { migrateConsoleSystem } from './dot-bridge.mjs'
+import { isBridgeFile, migrateConsoleSystem } from './dot-bridge.mjs'
 
 const dotSource = 'qoder-dot-demo'
 const digest = value => createHash('sha256').update(value).digest('hex')
@@ -78,7 +78,7 @@ export function createMigration(session, options, localMemory) {
       model: typeof agent.model === 'string' ? agent.model : fields(agent.model, ['id', 'effort', 'context_window']),
       metadata: { source: dotSource, migration: id },
     },
-    resources: (session.resources || []).map(resource => fields(resource,
+    resources: (session.resources || []).filter(resource => !isBridgeFile(resource, session.id)).map(resource => fields(resource,
       resource.type === 'file' ? ['type', 'file_id', 'mount_path'] : ['type', 'memory_store_id', 'access', 'instructions'])),
     stage: 'prepared',
   }

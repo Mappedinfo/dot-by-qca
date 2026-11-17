@@ -1,24 +1,27 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { loadEnvFile } from 'node:process'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CONSOLE_QUESTION, DOT_DSH_FOLLOWUP_TOOL, DOT_MAINTENANCE_TOOL, DOT_MEMORY_TOOL, DOT_TASKBOOK_TOOL, DSH_CLOCK_TOOL, DSH_COMMAND_HEADER, DSH_CONTINUE_TOOL, DSH_DIRECT_TOOL, DSH_PROJECTS_TOOL, DSH_REVIEW_TOOL, DSH_STATUS_TOOL, DSH_TOOL, MAC_TOOL, QcaError, configureQcaProxy, qcaClient } from './qca.mjs'
-import { approvedDshCommand, approvedDshTask, consoleApproves, directlyRequestedDshTask, questionAnswer, requestedMacClock, validTerminalCommand } from './console-approval.mjs'
-import { reviewDshTask, runDsh, runDshCommandTask } from './dsh-runner.mjs'
+import { approvedDshCommand, approvedDshTask, consoleApproves, directlyRequestedDshTask, misplacedMacClockProbe, questionAnswer, requestedMacClock, validTerminalCommand } from './console-approval.mjs'
+import { dshCliAvailable, reviewDshTask, runDsh, runDshCommandTask } from './dsh-runner.mjs'
 import { blockedTerminalCommand } from './task-review.mjs'
 import { archiveCutoff, archiveDateReply, archiveRequest, previewArchive, seedArchivePreview } from './dot-archive.mjs'
 import { applyMemory, memoryIntent, memoryMarkdown, readMemory } from './dot-memory.mjs'
 import { createMigration, dotWorkerReady, idleDotSession, MigrationError, migrationOptions, runMigration } from './dot-migration.mjs'
-import { dshSearchIntent, matchDshSessions, offlineTaskbook, Taskbook, taskbookIntent } from './dot-taskbook.mjs'
+import { cloudAssignmentTitle, cloudReplyIntent, cloudResultIntent, cloudSearchIntent, completionNumber, completionSelection, dshSearchIntent, macRunReceipt, macRunResultIntent, matchDshSessions, offlineTaskbook, readCloudReply, readCloudResult, recentWindow, searchCloudTaskbook, Taskbook, taskbookActivity, taskbookCompleted, taskbookIntent } from './dot-taskbook.mjs'
 import { webTaskSource } from './dsh-task-source.mjs'
-import { dshFollowupIntent, dshFollowupResultIntent, readFollowup } from './dot-dsh-followup.mjs'
-import { bridgeHeartbeat, maintenancePath, offlineTaskbookPath, publishStatus } from './dot-bridge.mjs'
-import { consoleConfigurationPatch, maintenanceIntent } from './dot-maintenance.mjs'
+import { dshFollowupIntent, dshFollowupResultIntent, dshSessionResultIntent, dshStopIntent, dshTurnResultIntent, readFollowup, readSessionResult, readStoppedTurn, scanDshCompletions } from './dot-dsh-followup.mjs'
+import { bridgeHeartbeat, maintenancePath, offlineTaskbookPath, publishStatus, turnAvailability } from './dot-bridge.mjs'
+import { consoleConfigurationPatch, latestMaintenanceRequest, maintenanceIntent } from './dot-maintenance.mjs'
 import { dotName, entryTitle } from './dot-entry.mjs'
+import { approvalNotifier, qcaApprovalSender, serverChanApprovalSender } from './dot-approval-notify.mjs'
+import { wechatApproval } from './dot-wechat-approval.mjs'
+import { oldCloudFollowupIntent, oldCloudRelayText, oldCloudResultIntent, readOldCloudFollowup } from './dot-cloud-followup.mjs'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 try {
@@ -37,6 +40,8 @@ const token = process.env.QODER_PAT || process.env.QODER_ACCESS_TOKEN
 const stateDir = resolve(root, mock ? '.dot-state-mock' : '.dot-state', mock ? 'local' : site)
 const markerDir = resolve(stateDir, 'mac-markers')
 const dshRunDir = resolve(stateDir, 'dsh-runs')
+const dshStopDir = resolve(stateDir, 'dsh-stops')
+const cloudFollowupDir = resolve(stateDir, 'cloud-followups')
 const dshWorkDir = resolve(stateDir, 'dsh-work')
 const dshWorkspaceDir = resolve(stateDir, 'dot-workspace')
 const stateFile = resolve(stateDir, 'session.json')
@@ -44,9 +49,11 @@ const projectFile = resolve(stateDir, 'selected-project.json')
 const memoryFile = resolve(stateDir, 'MEMORY.md')
 const migrationFile = resolve(stateDir, 'migration.json')
 const maintenanceFile = resolve(stateDir, 'maintenance.json')
+const maintenanceRecoveryFile = resolve(stateDir, 'maintenance-recovery.json')
 const historyEntryFile = resolve(stateDir, 'history-entries.json')
 const taskbook = new Taskbook(resolve(stateDir, 'taskbook.json'), writeJson)
-const dshWeb = consoleMode ? webTaskSource() : undefined
+const dshWeb = consoleMode ? webTaskSource({ internalWorkDir: dshWorkDir }) : undefined
+let dshWebAvailable = false
 const port = Number(process.env.DOT_PORT || 4317)
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('DOT_PORT 无效。')
 
@@ -156,6 +163,13 @@ let migrationIssue
 let consoleUpdate
 let maintenance = consoleMode ? await readFile(maintenanceFile, 'utf8')
   .then(JSON.parse).catch(error => { if (error.code !== 'ENOENT') throw error }) : undefined
+const maintenanceRecovery = consoleMode ? await readFile(maintenanceRecoveryFile, 'utf8').then(JSON.parse).catch(async error => {
+  if (error.code !== 'ENOENT') throw error
+  const value = { since: Date.now() }
+  await writeJson(maintenanceRecoveryFile, value)
+  return value
+}) : undefined
+let maintenanceReadCursor
 let maintenanceRunning
 let publishedMaintenance
 let publishingMaintenance
@@ -191,6 +205,19 @@ function canMaintain() {
     phase === 'idle' && cloudConnection === 'connected'
 }
 
+function recoverMaintenanceRequest() {
+  if (maintenanceRunning || !canMaintain() || ['queued', 'checking'].includes(maintenance?.status) ||
+    cursor === maintenanceReadCursor) return
+  maintenanceReadCursor = cursor
+  const sourceSessionId = state.sessionId
+  const request = latestMaintenanceRequest(events.values(), maintenanceRecovery.since)
+  if (!request || request.requestId === maintenance?.requestId ||
+    request.requestedAt <= (maintenance?.lastUserRequestAt ?? 0)) return
+  maintenanceRunning = saveMaintenance({ status: 'queued', origin: 'recovered_chat', ...request,
+    lastUserRequestAt: request.requestedAt, sourceSessionId, toolEventId: undefined, retryAfter: undefined, outcome: undefined })
+    .catch(() => { maintenanceReadCursor = undefined }).finally(() => { maintenanceRunning = undefined })
+}
+
 function runQueuedMaintenance() {
   if (maintenanceRunning || !canMaintain() || !['queued', 'checking'].includes(maintenance?.status)) return
   if (maintenance.sourceSessionId !== state.sessionId) {
@@ -202,7 +229,7 @@ function runQueuedMaintenance() {
   }
   if (maintenance.status === 'checking' && migrationIssue && migration?.options.repairWorker && migration.stage !== 'ready') return
   if (maintenance.retryAfter && Date.now() < maintenance.retryAfter) return
-  if (maintenance.origin !== 'automatic') {
+  if (maintenance.origin === 'chat') {
     const history = [...events.values()]
     const start = history.findIndex(event => event.id === maintenance.requestId)
     if (start < 0) return
@@ -279,6 +306,29 @@ function checkManagedConfiguration() {
 }
 let cloudTaskRefresh
 const cloudTaskEvents = new Map()
+const relayPollAttempts = new Map()
+
+async function refreshCloudFollowups(sessions) {
+  const files = await readdir(cloudFollowupDir).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+    return []
+  })
+  const now = Date.now()
+  const pending = files.flatMap(file => /^[a-f0-9]{20}\.json$/.test(file) ? [file.slice(0, -5)] : [])
+    .filter(id => !['completed', 'failed', 'cancelled'].includes(taskbook.cloudFollowups[id]?.status) &&
+      (!taskbook.cloudFollowups[id]?.cloudSessionId || sessions.includes(taskbook.cloudFollowups[id].cloudSessionId)))
+    .sort((a, b) => (relayPollAttempts.get(a) || 0) - (relayPollAttempts.get(b) || 0))
+  const signal = AbortSignal.any([serviceSignal.signal, AbortSignal.timeout(8000)])
+  const changes = await Promise.allSettled(pending.slice(0, 8).map(async id => {
+    relayPollAttempts.set(id, now)
+    const item = JSON.parse(await readFile(resolve(cloudFollowupDir, `${id}.json`), 'utf8'))
+    if (item.relayId !== id || !sessions.includes(item.sessionId) ||
+      item.sourceSessionId && !sessions.includes(item.sourceSessionId)) return false
+    const observed = item.rejected ? { status: 'relay_rejected' } : await readOldCloudFollowup(client, item, signal)
+    return taskbook.acceptCloudFollowup(item, observed, now)
+  }))
+  return changes.some(change => change.status === 'fulfilled' && change.value)
+}
 
 async function cloudThreadStatus(sessionId, threads) {
   if (sessionId === state.sessionId) return events.values()
@@ -286,16 +336,12 @@ async function cloudThreadStatus(sessionId, threads) {
   cloudTaskEvents.set(sessionId, saved)
   const fingerprint = JSON.stringify(threads.map(row => [row.id, row.status, row.updated_at]))
   if (saved.fingerprint === fingerprint) return saved.events.values()
-  for await (const event of client.events(sessionId, saved.cursor)) {
-    if (event.type.startsWith('session.thread_status_') && event.session_thread_id) {
-      saved.events.set(event.session_thread_id, event)
-    } else if (event.type === 'agent.thread_message_received' && event.from_session_thread_id) {
-      const { type, id, from_session_thread_id, processed_at } = event
-      saved.events.set('reply:' + from_session_thread_id, { type, id, from_session_thread_id, processed_at })
-    } else if (event.type === 'agent.thread_message_sent' && event.to_session_thread_id) {
-      const { type, to_session_thread_id, processed_at } = event
-      saved.events.set('sent:' + to_session_thread_id, { type, to_session_thread_id, processed_at })
-    }
+  for await (const event of client.events(sessionId, saved.cursor, ['session.thread_status_idle', 'session.thread_status_running',
+    'session.thread_status_rescheduled', 'session.thread_status_terminated', 'agent.thread_message_received', 'agent.thread_message_sent'])) {
+    const { type, id, session_thread_id, to_session_thread_id, from_session_thread_id, processed_at, stop_reason } = event
+    saved.events.set(id, { type, id, session_thread_id, to_session_thread_id, from_session_thread_id, processed_at,
+      ...(stop_reason && { stop_reason: { type: stop_reason.type } }),
+      ...(type === 'agent.thread_message_sent' && { assignmentTitle: cloudAssignmentTitle(event) }) })
     saved.cursor = event.id
   }
   saved.fingerprint = fingerprint
@@ -311,7 +357,8 @@ function refreshTaskbookCloud() {
       const history = await cloudThreadStatus(sessionId, threads)
       taskbook.acceptCloud(sessionId, threads, history)
     })).then(async results => {
-      if (results.some(result => result.status === 'fulfilled')) await taskbook.persist()
+      const relaysChanged = await refreshCloudFollowups(tracked).catch(() => false)
+      if (relaysChanged || results.some(result => result.status === 'fulfilled')) await taskbook.persist()
       if (results[0].status === 'rejected') throw results[0].reason
     }).finally(() => { cloudTaskRefresh = undefined })
   }
@@ -372,7 +419,7 @@ function syncHistoryEntries() {
 }
 
 function fullTaskbook() {
-  return taskbook.snapshot(state.sessionId, Date.now(), earlierDotSessions())
+  return taskbook.snapshot(state.sessionId, Date.now(), earlierDotSessions(), activeMacRun())
 }
 
 function migrationReceipt(job) {
@@ -588,15 +635,27 @@ async function refresh(force = false) {
 }
 
 function approvalRequests() {
-  const resolved = new Set([...events.values()]
-    .filter(event => event.type === 'user.custom_tool_result')
-    .map(event => event.custom_tool_use_id))
+  const resolved = new Set([...events.values()].flatMap(event => {
+    if (event.type === 'user.custom_tool_result') return [event.custom_tool_use_id]
+    if (event.type === 'agent.tool_result') return [event.tool_use_id]
+    return []
+  }))
   return pauseIds.map(id => events.get(id)).filter(event => event?.type === 'agent.custom_tool_use' && !resolved.has(event.id))
 }
 
-function consoleApprovals() {
-  const confirmed = new Set([...events.values()].filter(event => event.type === 'user.tool_confirmation')
+function nativeApprovals() {
+  if (!pauseIds.length) return []
+  const confirmed = new Set([...events.values()].filter(event => ['user.tool_confirmation', 'agent.tool_result'].includes(event.type))
     .map(event => event.tool_use_id))
+  return pauseIds.map(id => events.get(id))
+    .filter(event => event?.type === 'agent.tool_use' && event.evaluated_permission === 'ask' && !confirmed.has(event.id))
+}
+
+function clockRoutingProbe(event) {
+  return misplacedMacClockProbe(events.values(), event, state.decisions)
+}
+
+function consoleApprovals() {
   const approvals = approvalRequests().flatMap(event => {
     const questions = event.input?.questions
     if (event.name !== CONSOLE_QUESTION || !Array.isArray(questions) || questions.length !== 1) return []
@@ -607,11 +666,9 @@ function consoleApprovals() {
     const expired = question.header === DSH_COMMAND_HEADER && question.question === commandRun?.expiredCommand?.question
     return [{ id: event.id, title: question.header, text: question.question, choices, expired }]
   })
-  for (const id of pauseIds) {
-    const event = events.get(id)
-    if (event?.type === 'agent.tool_use' && event.evaluated_permission === 'ask' && !confirmed.has(id)) {
-      approvals.push({ id, title: `Qoder 云端 · ${event.name}`, text: JSON.stringify(event.input, null, 2), choices: ['允许', '拒绝'], native: true })
-    }
+  for (const event of nativeApprovals()) {
+    if (clockRoutingProbe(event)) continue
+    approvals.push({ id: event.id, title: `Qoder 云端 · ${event.name}`, text: JSON.stringify(event.input, null, 2), choices: ['允许', '拒绝'], native: true })
   }
   return approvals
 }
@@ -624,8 +681,21 @@ function validLabel(event) {
 
 function snapshot() {
   const transcript = []
+  const pendingCloudReplies = new Set()
   let activity
+  let latestReply
   for (const event of events.values()) {
+    if (event.type === 'user.message' || event.type === 'user.interrupt') pendingCloudReplies.clear()
+    if (event.type === 'agent.thread_message_sent' && event.to_session_thread_id) pendingCloudReplies.add(event.to_session_thread_id)
+    if (event.type === 'agent.thread_message_received') pendingCloudReplies.delete(event.from_session_thread_id)
+    if (event.type === 'session.thread_status_terminated') pendingCloudReplies.delete(event.session_thread_id)
+    if (event.type === 'session.status_idle') {
+      if (event.stop_reason?.type === 'end_turn' && latestReply && !pendingCloudReplies.size) latestReply.replyCompleted = true
+      latestReply = undefined
+    }
+    if (['user.message', 'user.interrupt', 'session.error', 'session.status_terminated', 'session.deleted'].includes(event.type)) {
+      latestReply = undefined
+    }
     if (event.type === 'user.message') activity = undefined
     if (['user.interrupt', 'session.status_terminated', 'session.deleted'].includes(event.type)) activity = undefined
     if (event.type === 'agent.custom_tool_use' && event.name === DSH_REVIEW_TOOL) activity = 'Mac DSH 正在审查方案'
@@ -675,7 +745,10 @@ function snapshot() {
       const receipt = message.text.match(/回执：([a-f0-9]{20})/)?.[1]
       if (receipt) message.summary = 'Mac 回执 · ' + receipt
     }
-    if (message.text) transcript.push(message)
+    if (message.text) {
+      transcript.push(message)
+      if (message.type === 'agent.message') latestReply = message
+    }
   }
   const approvals = consoleMode ? consoleApprovals() : approvalRequests().map(event => ({
     id: event.id,
@@ -737,13 +810,18 @@ async function stopTurn({ turnId }) {
   }
 }
 
-async function recordApproval({ id, decision, choice }) {
+async function recordApproval({ id, decision, choice }, expected) {
   requireClient()
   if (!state.sessionId) throw new HttpError(409, '请先创建主会话。')
   if (typeof id !== 'string') throw new HttpError(400, '审批参数无效。')
   await refresh(true)
   if (consoleMode) {
-    const card = consoleApprovals().find(approval => approval.id === id)
+    const approvals = consoleApprovals()
+    if (expected && (state.sessionId !== expected.sessionId || Date.now() >= expected.expiresAt ||
+      cloudConnection !== 'connected' || phase !== 'approval' || approvals.filter(card => !card.expired).length !== 1)) {
+      throw new HttpError(409, '微信审批已失效。')
+    }
+    const card = approvals.find(approval => approval.id === id)
     if (!card || stopRequested) throw new HttpError(409, '这张卡片已经处理或不在当前回合。')
     if (!card.choices.includes(choice)) throw new HttpError(400, '请选择卡片上的选项。')
     if (card.expired && choice === '允许') throw new HttpError(409, '这条命令的审批已过期。请结束此卡片，再决定是否重新发起任务。')
@@ -805,8 +883,61 @@ const serviceSignal = new AbortController()
 let consoleWorker = new AbortController()
 let commandRun
 let localDshRun
+let runningMacReceipt
 let finishing
 let finishAgain = false
+
+function activeMacRun() {
+  if (commandRun && !commandRun.outcome && !commandRun.controller.signal.aborted) {
+    return { receipt: commandRun.identity.receipt, status: commandRun.pending ? 'waiting' : 'running' }
+  }
+  if (runningMacReceipt && localDshRun && !localDshRun.signal.aborted) return { receipt: runningMacReceipt, status: 'running' }
+}
+
+async function saveMacRun(record) {
+  await writeJson(resolve(dshRunDir, `${record.receipt}.json`), record)
+  taskbook.acceptMacRun(record.receipt, record)
+}
+
+async function readMacRun(receipt) {
+  return readFile(resolve(dshRunDir, `${receipt}.json`), 'utf8').then(JSON.parse).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+  })
+}
+
+async function lookupMacRun(receipt) {
+  const record = await readMacRun(receipt)
+  const run = macRunReceipt(record, receipt)
+  if (!run || ![state.sessionId, ...earlierDotSessions()].includes(run.cloudSessionId)) return { status: 'unknown_receipt', receipt }
+  taskbook.acceptMacRun(receipt, record)
+  const result = taskbook.macRun(receipt, activeMacRun())
+  const output = typeof record.text === 'string' ? record.text : ''
+  const commands = Array.isArray(record.commandResults) ? record.commandResults : []
+  if (run.status === 'not_run' && typeof record.review?.reason === 'string') result.reason = record.review.reason
+  return { ...result, ...(output && { output: output.slice(0, 3000) }),
+    ...(commands.length && { commandResults: commands.slice(0, 12).map(({ command, status, output }) => ({
+      command, status, output: typeof output === 'string' ? output.slice(0, 1500) : undefined,
+    })) }), ...(output.length > 3000 || commands.length > 12 || commands.some(command => command.output?.length > 1500)
+      ? { truncated: true } : {}),
+  }
+}
+
+async function restoreMacRuns() {
+  const files = await readdir(dshRunDir).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+    return []
+  })
+  const pending = files.filter(file => /^[a-f0-9]{20}\.json$/.test(file))
+  for (let i = 0; i < pending.length; i += 16) {
+    await Promise.all(pending.slice(i, i + 16).map(async file => {
+      const receipt = file.slice(0, -5)
+      const record = await readMacRun(receipt).catch(error => {
+        if (!(error instanceof SyntaxError)) throw error
+      })
+      taskbook.acceptMacRun(receipt, record)
+    }))
+  }
+}
 
 function startCommandRun(request, identity, cwd) {
   const controller = new AbortController()
@@ -863,7 +994,7 @@ function startCommandRun(request, identity, cwd) {
       dshSessionId: error.sessionId, ...error.audit }))
     .then(outcome => {
       const interruptedAt = run.interruptedCommand?.relayEventId
-      run.outcome = { ...outcome, ...(run.expiredCommand && { status: 'expired' }), resultEventId: run.continueId || identity.eventId,
+      run.outcome = { ...outcome, ...(run.expiredCommand && { status: 'expired' }), finishedAt: Date.now(), resultEventId: run.continueId || identity.eventId,
         ...(interruptedAt && { interruptedAt }) }
       return persistCommandOutcome(run)
     })
@@ -872,7 +1003,7 @@ function startCommandRun(request, identity, cwd) {
 }
 
 function persistCommandOutcome(run) {
-  run.saving ??= writeJson(resolve(dshRunDir, `${run.identity.receipt}.json`), run.outcome).catch(error => {
+  run.saving ??= saveMacRun(run.outcome).catch(error => {
     run.saving = undefined
     throw error
   })
@@ -881,8 +1012,7 @@ function persistCommandOutcome(run) {
 
 async function readCommandOutcome(receipt, resultEventId, interruptedEventId) {
   if (!/^[a-f0-9]{20}$/.test(receipt || '')) return
-  const saved = await readFile(resolve(dshRunDir, `${receipt}.json`), 'utf8')
-    .then(JSON.parse).catch(error => { if (error.code !== 'ENOENT') throw error })
+  const saved = await readMacRun(receipt)
   const matchingResult = saved?.resultEventId === resultEventId && ['completed', 'failed', 'cancelled', 'expired'].includes(saved.status)
   const matchingInterruption = interruptedEventId && saved?.resultEventId === interruptedEventId &&
     (saved.status === 'expired' || (saved.status === 'cancelled' && saved.interruptedAt === interruptedEventId))
@@ -1001,7 +1131,9 @@ async function finishDshRequest(event, request) {
   }
   if (!request.project) await mkdir(cwd, { recursive: true, mode: 0o700 })
   const path = resolve(dshRunDir, `${receipt}.json`)
-  const identity = { receipt, qcaSessionId: state.sessionId, eventId: id, workspace: request.workspace,
+  const title = event.name === DSH_CLOCK_TOOL ? '读取 Mac 时钟'
+    : request.commands ? 'Mac 终端任务' : request.workspace ? 'Dot 工作区任务' : 'Mac DSH 文本任务'
+  const identity = { receipt, qcaSessionId: state.sessionId, eventId: id, workspace: request.workspace, title,
     ...(request.project && { project: request.project.identity }) }
   if (commandRun?.identity.eventId !== id) {
     const prior = await readFile(path, 'utf8').then(JSON.parse).catch(error => {
@@ -1013,7 +1145,7 @@ async function finishDshRequest(event, request) {
       if (stopRequested || !approvalRequests().some(item => item.id === id)) return
       identity.review = review
       if (review.verdict !== 'allow') {
-        await writeJson(path, { ...identity, status: 'not_run' })
+        await saveMacRun({ ...identity, status: 'not_run', finishedAt: Date.now() })
         await returnToolResult(id, receipt, JSON.stringify({ status: 'not_run', receipt, ...review }), true)
         return
       }
@@ -1029,8 +1161,9 @@ async function finishDshRequest(event, request) {
       await returnToolResult(id, receipt, 'Mac 已有一项终端任务，请先完成该任务。', true)
       return
     }
+    const started = { ...identity, commands: true, status: 'started', startedAt: Date.now() }
     try {
-      await writeFile(path, JSON.stringify({ ...identity, commands: true, status: 'started' }), { flag: 'wx', mode: 0o600 })
+      await writeFile(path, JSON.stringify(started), { flag: 'wx', mode: 0o600 })
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
       const outcome = await readCommandOutcome(receipt, id)
@@ -1038,26 +1171,31 @@ async function finishDshRequest(event, request) {
       await returnToolResult(id, receipt, `这项终端任务曾启动，请核对本地回执。回执：${receipt}`, true)
       return
     }
-    return relayCommandRun(startCommandRun(request, { ...identity, commands: true }, cwd), id, receipt)
+    taskbook.acceptMacRun(receipt, started)
+    return relayCommandRun(startCommandRun(request, started, cwd), id, receipt)
   }
   let outcome
   try {
     outcome = JSON.parse(await readFile(path, 'utf8'))
   } catch (error) {
     if (error.code !== 'ENOENT') throw error
-    await writeFile(path, JSON.stringify({ ...identity, status: 'started' }), { flag: 'wx', mode: 0o600 })
+    const started = { ...identity, status: 'started', startedAt: Date.now() }
+    await writeFile(path, JSON.stringify(started), { flag: 'wx', mode: 0o600 })
+    taskbook.acceptMacRun(receipt, started)
     const controller = new AbortController()
     localDshRun = controller
+    runningMacReceipt = receipt
     try {
       const answer = await runDsh(request.task, cwd, AbortSignal.any([consoleWorker.signal, controller.signal]), request.workspace)
-      outcome = { ...identity, status: 'completed', dshSessionId: answer.sessionId, text: answer.text }
+      outcome = { ...started, status: 'completed', dshSessionId: answer.sessionId, text: answer.text }
     } catch (error) {
       console.error(`QCA DSH 运行失败 · ${receipt} · ${error.code || error.name}`)
-      outcome = { ...identity, status: controller.signal.aborted ? 'cancelled' : 'failed' }
+      outcome = { ...started, status: controller.signal.aborted ? 'cancelled' : 'failed' }
     } finally {
       localDshRun = undefined
+      runningMacReceipt = undefined
     }
-    await writeJson(path, outcome)
+    await saveMacRun({ ...outcome, finishedAt: Date.now() })
   }
   const completed = outcome.status === 'completed'
   const text = completed
@@ -1089,39 +1227,48 @@ function isArchivePreviewTurn(userText) {
 
 async function refreshDshFollowups(signal) {
   const pending = Object.values(taskbook.followups).filter(item =>
-    ['sending', 'queued', 'running', 'waiting', 'unconfirmed'].includes(item.status))
+    ['sending', 'queued', 'running', 'waiting', 'unconfirmed'].includes(item.status) ||
+    item.status === 'completed' && !item.finishedAt && item.finishedAtSeq !== undefined &&
+      Date.now() - (item.pollAttemptAt || 0) > 3600_000)
   pending.sort((a, b) => (a.pollAttemptAt || 0) - (b.pollAttemptAt || 0))
   const pollAttemptAt = Date.now()
   await Promise.all(pending.slice(0, 12).map(async item => {
     item.pollAttemptAt = pollAttemptAt
     try {
       const observed = await readFollowup(dshWeb, item, signal)
-      Object.assign(item, observed, { checkedAt: Date.now() })
+      if (item.status !== 'completed' || observed?.status === 'completed') {
+        Object.assign(item, observed, { checkedAt: Date.now() })
+      }
     } catch {
       // Retain the last observed status and time when the host cannot be reached.
     }
   }))
 }
 
-async function finishDshFollowup(event, user) {
-  const lookup = emptyToolInput(event) && user && dshFollowupResultIntent(eventText(user))
-  if (lookup) {
-    const sessions = new Set([state.sessionId, ...earlierDotSessions()])
-    const item = Object.values(taskbook.followups).find(entry => entry.receipt === lookup && sessions.has(entry.cloudSessionId))
-    const { receipt } = await saveDecision(event.id, item ? 'allow' : 'deny')
-    if (!item) return returnToolResult(event.id, receipt, JSON.stringify({ status: 'unknown_receipt', receipt: lookup }), true)
-    const signal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(8000)])
-    let observed
-    try {
-      observed = await readFollowup(dshWeb, item, signal, { includeResult: true })
-    } catch {}
-    const result = { sessionId: item.sessionId, receipt: lookup, status: item.status, checkedAt: item.checkedAt }
-    if (observed?.finishedAtSeq !== undefined || !['completed', 'cancelled', 'failed'].includes(item.status) && observed) {
-      Object.assign(result, observed, { checkedAt: Date.now() })
-    }
-    if (!result.result && result.status === 'completed') result.output = 'not_found_in_recent_history'
-    return returnToolResult(event.id, receipt, JSON.stringify(result), false)
+async function finishDshFollowupResult(event, user, lookup) {
+  const sessions = new Set([state.sessionId, ...earlierDotSessions()])
+  const item = Object.values(taskbook.followups).find(entry => entry.receipt === lookup && sessions.has(entry.cloudSessionId))
+  const { receipt } = await saveDecision(event.id, item ? 'allow' : 'deny')
+  if (!item) return returnToolResult(event.id, receipt, JSON.stringify({ status: 'unknown_receipt', receipt: lookup }), true)
+  const { signal } = consoleWorker
+  let observed
+  try {
+    observed = await readFollowup(dshWeb, item, AbortSignal.any([signal, AbortSignal.timeout(8000)]), { includeResult: true })
+  } catch {}
+  const result = { sessionId: item.sessionId, receipt: lookup, status: item.status, checkedAt: item.checkedAt }
+  if (observed?.finishedAtSeq !== undefined || !['completed', 'cancelled', 'failed'].includes(item.status) && observed) {
+    Object.assign(result, observed, { checkedAt: Date.now() })
   }
+  if (!result.result && result.status === 'completed') result.output = observed ? 'not_found_in_recent_history' : 'dsh_history_unavailable'
+  if (signal.aborted || stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+  await returnToolResult(event.id, receipt, JSON.stringify(result), false)
+}
+
+async function finishDshFollowup(event, user) {
+  const stop = emptyToolInput(event) && user && dshStopIntent(eventText(user))
+  if (stop) return finishDshStop(event, user, stop)
+  const lookup = emptyToolInput(event) && user && dshFollowupResultIntent(eventText(user))
+  if (lookup) return finishDshFollowupResult(event, user, lookup)
   const intent = emptyToolInput(event) && user && dshFollowupIntent(eventText(user))
   const existing = user && taskbook.followups[user.id]
   const approved = state.decisions[event.id]?.decision
@@ -1141,25 +1288,34 @@ async function finishDshFollowup(event, user) {
   const findTarget = async () => {
     const signal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(8000)])
     const items = await dshWeb.eligibleSessions(signal)
-    return items.find(item => item.sessionId === intent.sessionId)
+    return matchDshSessions(items, intent.sessionId ?? intent.title, { exactId: Boolean(intent.sessionId) })
   }
-  const target = await findTarget().catch(() => undefined)
-  if (!approvalRequests().some(item => item.id === event.id) || stopRequested || latestTurnId !== user.id) return
-  if (!target) return reply(receipt, 'session_not_available', undefined, true)
-  const review = await reviewLocalProposal({ task: intent.task, workspace: target.projections?.values.title || target.sessionId,
+  const pending = () => latestTurnId === user.id && !stopRequested && !consoleWorker.signal.aborted &&
+    approvalRequests().some(item => item.id === event.id)
+  const matches = await findTarget().catch(() => undefined)
+  if (!pending()) return
+  if (!matches) return reply(receipt, 'dsh_catalog_unavailable', undefined, true)
+  if (matches.total !== 1) return reply(receipt, matches.total ? 'multiple_matches' : 'no_match', matches)
+  const [target] = matches.matches
+  const review = await reviewLocalProposal({ task: intent.task, workspace: target.title || target.id,
     mode: 'existing_dsh_session' })
-  if (!approvalRequests().some(item => item.id === event.id) || stopRequested || latestTurnId !== user.id) return
+  if (!pending()) return
   if (review.verdict !== 'allow') {
     await reply(receipt, 'not_sent', { review }, true)
     return
   }
-  const currentTarget = await findTarget().catch(() => undefined)
+  const currentMatches = await findTarget().catch(() => undefined)
+  if (!pending()) return
+  if (!currentMatches) return reply(receipt, 'dsh_catalog_unavailable', undefined, true)
+  if (currentMatches.total !== 1 || currentMatches.matches[0].id !== target.id) {
+    return reply(receipt, 'target_changed', currentMatches)
+  }
   const signal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(8000)])
-  const current = currentTarget && await dshWeb.state(intent.sessionId, signal).catch(() => undefined)
-  if (!approvalRequests().some(item => item.id === event.id) || stopRequested || latestTurnId !== user.id) return
+  const current = await dshWeb.state(target.id, signal).catch(() => undefined)
+  if (!pending()) return
   if (!current) return reply(receipt, 'session_not_available', undefined, true)
   const requestId = randomUUID()
-  const item = { sessionId: intent.sessionId, requestId, receipt, cloudSessionId: state.sessionId,
+  const item = { sessionId: target.id, requestId, receipt, cloudSessionId: state.sessionId,
     status: 'sending', createdAt: Date.now(), checkedAt: Date.now(), startCursor: current.cursor }
   taskbook.followups[user.id] = item
   try {
@@ -1168,30 +1324,194 @@ async function finishDshFollowup(event, user) {
     delete taskbook.followups[user.id]
     throw error
   }
-  if (!approvalRequests().some(pending => pending.id === event.id) || stopRequested || latestTurnId !== user.id) {
+  if (!pending()) {
     item.status = 'cancelled'
     await taskbook.persist()
     return
   }
   try {
     const promptSignal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(8000)])
-    const result = await dshWeb.prompt(intent.sessionId, requestId, intent.task, promptSignal)
+    const result = await dshWeb.prompt(target.id, requestId, intent.task, promptSignal)
     item.status = result.accepted === true ? 'queued' : 'unconfirmed'
   } catch {
     item.status = 'unconfirmed'
   }
   item.checkedAt = Date.now()
   await taskbook.persist()
-  if (approvalRequests().some(pending => pending.id === event.id) && !stopRequested) {
-    await reply(receipt, item.status, { sessionId: intent.sessionId, receipt }, item.status === 'unconfirmed')
+  if (pending()) {
+    await reply(receipt, item.status, { sessionId: target.id, ...(target.title && { title: target.title }), receipt }, item.status === 'unconfirmed')
   }
 }
 
+async function finishDshStop(event, user, intent) {
+  const signal = consoleWorker.signal
+  const pending = () => !signal.aborted && latestTurnId === user.id && !stopRequested &&
+    approvalRequests().some(item => item.id === event.id)
+  const decision = state.decisions[event.id]?.decision || 'allow'
+  const { receipt } = await saveDecision(event.id, decision)
+  const stopId = createHash('sha256').update(`${state.sessionId}:${user.id}`).digest('hex').slice(0, 20)
+  const path = resolve(dshStopDir, `${stopId}.json`)
+  const reply = async (status, extra = {}) => {
+    if (pending()) await returnToolResult(event.id, receipt, JSON.stringify({ status, ...extra }), false)
+  }
+  if (decision !== 'allow') return reply('stop_unconfirmed')
+  const timed = () => AbortSignal.any([signal, AbortSignal.timeout(8000)])
+  let item = await readFile(path, 'utf8').then(JSON.parse).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+  })
+  if (!item) {
+    const items = await dshWeb.eligibleSessions(timed()).catch(() => undefined)
+    if (!pending()) return
+    if (!items) return reply('dsh_catalog_unavailable')
+    const matches = matchDshSessions(items, intent.sessionId ?? intent.title, { exactId: Boolean(intent.sessionId) })
+    if (matches.total !== 1) return reply(matches.total ? 'multiple_matches' : 'no_match', matches)
+    const [session] = matches.matches
+    if (items.find(candidate => candidate.sessionId === session.id)?.origin === 'subagent') {
+      return reply('use_parent_session', { session })
+    }
+    const before = await dshWeb.state(session.id, timed()).catch(() => undefined)
+    if (!before) return reply('stop_unconfirmed', { session })
+    if (!before.running) return reply('no_running_turn', { session, queued: before.queue?.length ?? null })
+    const currentBoundary = async cursor => {
+      if (!Number.isSafeInteger(cursor) || cursor < 0) return
+      const page = await dshWeb.history(session.id, timed(), undefined, cursor).catch(() => undefined)
+      return page?.records.findLast(({ event }) => event?.type === 'turn/start' || event?.type === 'turn/end')?.event
+    }
+    const boundary = await currentBoundary(before.cursor)
+    if (boundary?.type !== 'turn/start' || !Number.isSafeInteger(boundary.data?.turn)) {
+      return reply('turn_unconfirmed', { session })
+    }
+    if (!pending()) return
+    item = { session, cursor: before.cursor, turn: boundary.data.turn }
+    await mkdir(dshStopDir, { recursive: true, mode: 0o700 })
+    await writeJson(path, item)
+    const current = await dshWeb.state(session.id, timed()).catch(() => undefined)
+    const latest = current?.running && (current.cursor === before.cursor ? boundary : await currentBoundary(current.cursor))
+    if (!pending()) return
+    if (latest?.type === 'turn/start' && latest.data?.turn === item.turn) {
+      await dshWeb.cancel(session.id, timed()).catch(() => undefined)
+    }
+  }
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(7500)])
+  let outcome
+  try {
+    while (pending()) {
+      outcome = await readStoppedTurn(dshWeb, item, deadline)
+      if (outcome) break
+      await delay(350, undefined, { signal: deadline })
+    }
+  } catch {}
+  await reply(outcome?.status ?? 'stop_unconfirmed', { session: item.session, stopReceipt: stopId, ...outcome })
+}
+
+async function finishOldCloudFollowup(event, user, intent) {
+  const sourceSessionId = state.sessionId
+  const worker = consoleWorker.signal
+  const pending = () => !worker.aborted && state.sessionId === sourceSessionId && latestTurnId === user.id &&
+    !stopRequested && approvalRequests().some(item => item.id === event.id)
+  const { receipt } = await saveDecision(event.id, 'allow')
+  const relayId = createHash('sha256').update(`${sourceSessionId}:${user.id}`).digest('hex').slice(0, 20)
+  const path = resolve(cloudFollowupDir, `${relayId}.json`)
+  const reply = async (status, fields = {}) => {
+    if (pending()) await returnToolResult(event.id, receipt, JSON.stringify({ status, ...fields }), false)
+  }
+  let item = await readFile(path, 'utf8').then(JSON.parse).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+  })
+  if (item?.rejected) return reply('relay_rejected', { sessionId: item.sessionId, threadId: item.threadId, relayReceipt: relayId })
+  if (!item) {
+    const sessions = earlierDotSessions()
+    const lookups = await Promise.allSettled(sessions.map(async sessionId => ({ sessionId,
+      thread: (await client.listThreads(sessionId)).find(row => row.id === intent.threadId && row.role === 'child'),
+    })))
+    if (!pending()) return
+    const owner = lookups.find(entry => entry.status === 'fulfilled' && entry.value.thread)?.value
+    if (!owner) return reply(lookups.some(entry => entry.status === 'rejected') ? 'cloud_unavailable' : 'unknown_old_child_thread')
+    if (owner.thread.archived_at || owner.thread.status !== 'idle') {
+      return reply('old_child_unavailable', { sessionId: owner.sessionId, threadId: intent.threadId, threadStatus: owner.thread.status })
+    }
+    const historyTypes = ['session.status_idle', 'user.message']
+    const deadline = AbortSignal.any([worker, AbortSignal.timeout(15_000)])
+    const old = await client.getSession(owner.sessionId).catch(() => undefined)
+    if (!old || old.status !== 'idle' || old.archived_at || old.metadata?.source !== 'qoder-dot-demo') {
+      return reply('old_session_unavailable', { sessionId: owner.sessionId })
+    }
+    let cursor
+    let idle
+    try {
+      for await (const history of client.events(owner.sessionId, undefined, historyTypes, deadline)) {
+        cursor = history.id
+        if (history.type === 'session.status_idle') idle = history
+      }
+    } catch {
+      return reply('cloud_unavailable', { sessionId: owner.sessionId })
+    }
+    if (!pending()) return
+    if (!cursor || idle?.stop_reason?.type === 'requires_action') return reply('old_session_unavailable', { sessionId: owner.sessionId })
+    item = { ...intent, cursor, relayId, sourceSessionId, sessionId: owner.sessionId, createdAt: Date.now() }
+    await mkdir(cloudFollowupDir, { recursive: true, mode: 0o700 })
+    await writeJson(path, item)
+    if (!pending()) return
+    try {
+      await client.send(item.sessionId, { type: 'user.message', content: textBlocks(oldCloudRelayText(item)) },
+        `dot-old-worker-${relayId}`, deadline)
+    } catch (error) {
+      if (error instanceof QcaError && error.status < 500) {
+        await writeJson(path, { ...item, rejected: true })
+        if (taskbook.acceptCloudFollowup(item, { status: 'relay_rejected' })) await taskbook.persist()
+        return reply('relay_rejected', { sessionId: item.sessionId, threadId: item.threadId, relayReceipt: relayId })
+      }
+    }
+  }
+  let result = { status: 'relay_unconfirmed' }
+  const signal = AbortSignal.any([worker, AbortSignal.timeout(22_000)])
+  try {
+    while (pending()) {
+      result = await readOldCloudFollowup(client, item, signal)
+      if (!['relay_pending', 'dispatched'].includes(result.status)) break
+      await delay(1000, undefined, { signal })
+    }
+  } catch {}
+  if (taskbook.acceptCloudFollowup(item, result)) await taskbook.persist()
+  await reply(result.status, { sessionId: item.sessionId, threadId: item.threadId, relayReceipt: relayId, ...result })
+}
+
+async function finishOldCloudResult(event, user, relayReceipt) {
+  const sessionId = state.sessionId
+  const signal = consoleWorker.signal
+  const chain = new Set([sessionId, ...earlierDotSessions()])
+  const { receipt } = await saveDecision(event.id, 'allow')
+  const item = await readFile(resolve(cloudFollowupDir, `${relayReceipt}.json`), 'utf8').then(JSON.parse).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+  })
+  let result = { status: 'unknown_relay_receipt' }
+  if (item?.relayId === relayReceipt && chain.has(item.sessionId) && (!item.sourceSessionId || chain.has(item.sourceSessionId))) {
+    const observed = item.rejected ? { status: 'relay_rejected' }
+      : await readOldCloudFollowup(client, item, AbortSignal.any([signal, AbortSignal.timeout(15_000)]))
+        .catch(() => ({ status: 'cloud_unavailable' }))
+    if (taskbook.acceptCloudFollowup(item, observed)) await taskbook.persist()
+    result = { sessionId: item.sessionId, threadId: item.threadId, ...observed }
+  }
+  if (signal.aborted || state.sessionId !== sessionId || latestTurnId !== user.id || stopRequested ||
+    !approvalRequests().some(item => item.id === event.id)) return
+  await returnToolResult(event.id, receipt, JSON.stringify({ relayReceipt, ...result }), false)
+}
+
 async function finishConsoleRequest() {
+  if (acceptedEvent || stopRequested) return
+  const misplaced = nativeApprovals().find(clockRoutingProbe)
+  if (misplaced) {
+    const result = await client.send(state.sessionId, { type: 'user.tool_confirmation', tool_use_id: misplaced.id, result: 'deny',
+      deny_message: 'Dot Mac 桥接已收到本轮，只读时钟任务已确认。请直接调用 read_mac_clock（空对象），由 Mac DSH 独立复核并读取时钟，无需再次检查在线或发审批卡。',
+    }, `dot-clock-routing-${misplaced.id}`)
+    recordAcceptedEvent(result)
+    return
+  }
   const event = approvalRequests().find(request => [MAC_TOOL, DSH_TOOL, DSH_DIRECT_TOOL, DSH_CLOCK_TOOL, DSH_CONTINUE_TOOL, DSH_PROJECTS_TOOL, DSH_REVIEW_TOOL, DSH_STATUS_TOOL, DOT_MEMORY_TOOL, DOT_TASKBOOK_TOOL, DOT_MAINTENANCE_TOOL, DOT_DSH_FOLLOWUP_TOOL].includes(request.name))
-  if (!event || acceptedEvent || stopRequested) return
+  if (!event) return
   const user = events.get(latestTurnId)
   const userText = user ? eventText(user) : ''
+  const number = completionNumber(userText)
   if (event.name === DOT_MAINTENANCE_TOOL) {
     const intent = emptyToolInput(event) && maintenanceIntent(userText)
     const { receipt } = await saveDecision(event.id, intent ? 'allow' : 'deny')
@@ -1199,15 +1519,26 @@ async function finishConsoleRequest() {
     if (intent === 'repair' && maintenance?.requestId !== user.id &&
       !['queued', 'checking', 'migrating', 'ready_to_switch'].includes(current)) {
       await saveMaintenance({ status: 'queued', origin: 'chat', requestId: user.id, sourceSessionId: state.sessionId,
-        toolEventId: event.id, retryAfter: undefined, outcome: undefined })
+        lastUserRequestAt: Date.parse(user.processed_at) || Date.now(), toolEventId: event.id, retryAfter: undefined, outcome: undefined })
     }
     const result = intent ? maintenanceStatus() : { status: 'explicit_maintenance_request_required' }
     await returnToolResult(event.id, receipt, JSON.stringify(result), !intent)
     return
   }
   if (event.name === DOT_DSH_FOLLOWUP_TOOL) return finishDshFollowup(event, user)
+  const selection = number !== undefined && event.name === DOT_TASKBOOK_TOOL && emptyToolInput(event)
+    ? completionSelection(events.values(), user.id, number, state.decisions) : undefined
+  const lookupText = selection?.query ?? userText
   const searchQuery = dshSearchIntent(userText)
-  if ((dshFollowupIntent(userText) || dshFollowupResultIntent(userText) || searchQuery) &&
+  const sessionResult = dshSessionResultIntent(userText)
+  const turnResult = dshTurnResultIntent(lookupText)
+  const cloudQuery = cloudSearchIntent(userText)
+  const cloudThreadId = cloudResultIntent(userText)
+  const cloudReplyId = cloudReplyIntent(lookupText)
+  const macReceipt = macRunResultIntent(lookupText)
+  const oldCloudFollowup = oldCloudFollowupIntent(userText)
+  const oldCloudResult = oldCloudResultIntent(lookupText)
+  if ((number !== undefined || dshFollowupIntent(userText) || dshStopIntent(userText) || dshFollowupResultIntent(userText) || searchQuery || sessionResult || turnResult || cloudThreadId || cloudReplyId || cloudQuery || oldCloudFollowup || oldCloudResult || macReceipt) &&
     [DSH_TOOL, DSH_DIRECT_TOOL, DSH_CLOCK_TOOL, DSH_CONTINUE_TOOL, MAC_TOOL].includes(event.name)) {
     const existing = state.decisions[event.id]?.decision
     const { receipt } = await saveDecision(event.id, existing || 'deny')
@@ -1215,12 +1546,74 @@ async function finishConsoleRequest() {
     return
   }
   if (event.name === DOT_TASKBOOK_TOOL) {
-    const query = emptyToolInput(event) && searchQuery
+    if (selection) {
+      const dshReceipt = dshFollowupResultIntent(lookupText)
+      if (dshReceipt) return finishDshFollowupResult(event, user, dshReceipt)
+      if (!turnResult && !cloudReplyId && !macReceipt && !oldCloudResult) {
+        const { receipt } = await saveDecision(event.id, 'deny')
+        return returnToolResult(event.id, receipt, JSON.stringify(selection.status ? selection :
+          { status: 'completion_result_unavailable', number }), true)
+      }
+    }
+    if (emptyToolInput(event) && cloudReplyId) {
+      const { receipt } = await saveDecision(event.id, 'allow')
+      const sessions = [state.sessionId, ...earlierDotSessions()]
+      const signal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(12_000)])
+      const matches = await Promise.allSettled(sessions.map(id => readCloudReply(client, id, cloudReplyId, signal)))
+      const result = matches.find(match => match.status === 'fulfilled' && match.value)?.value ??
+        { status: matches.some(match => match.status === 'rejected') ? 'cloud_unavailable' : 'unknown_reply' }
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(result), !result.resultEventId)
+    }
+    if (emptyToolInput(event) && macReceipt) {
+      const { receipt } = await saveDecision(event.id, 'allow')
+      const result = await lookupMacRun(macReceipt)
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(result), result.status === 'unknown_receipt')
+    }
+    if (emptyToolInput(event) && oldCloudResult) return finishOldCloudResult(event, user, oldCloudResult)
+    if (emptyToolInput(event) && oldCloudFollowup) return finishOldCloudFollowup(event, user, oldCloudFollowup)
+    if (emptyToolInput(event) && cloudQuery) {
+      const { receipt } = await saveDecision(event.id, 'allow')
+      await refreshTaskbookCloud().catch(() => {})
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(searchCloudTaskbook(fullTaskbook(), cloudQuery)), false)
+    }
+    if (emptyToolInput(event) && cloudThreadId) {
+      const { receipt } = await saveDecision(event.id, 'allow')
+      const sessions = [state.sessionId, ...earlierDotSessions()]
+      const found = await Promise.allSettled(sessions.map(async sessionId => ({ sessionId,
+        thread: (await client.listThreads(sessionId)).find(row => row.id === cloudThreadId && (row.parent_thread_id || row.role === 'child')),
+      })))
+      const owner = found.find(entry => entry.status === 'fulfilled' && entry.value.thread)?.value
+      let result = { status: found.some(entry => entry.status === 'rejected') ? 'cloud_unavailable' : 'unknown_child_thread' }
+      if (owner) {
+        try {
+          result = { ...await readCloudResult(client, owner.sessionId, cloudThreadId), sessionId: owner.sessionId,
+            threadId: cloudThreadId, threadStatus: owner.thread.status }
+        } catch { result = { status: 'cloud_unavailable' } }
+      }
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(result), !owner || result.status === 'cloud_unavailable')
+    }
+    const query = emptyToolInput(event) && (turnResult?.sessionId || sessionResult || searchQuery)
     if (query) {
       const { receipt } = await saveDecision(event.id, 'allow')
+      const sessionId = state.sessionId
       const signal = AbortSignal.any([consoleWorker.signal, AbortSignal.timeout(8000)])
-      const matches = await dshWeb.eligibleSessions(signal).then(items => matchDshSessions(items, query)).catch(() => undefined)
+      const matches = await dshWeb.eligibleSessions(signal).then(items =>
+        matchDshSessions(items, query, { exactId: Boolean(turnResult) })).catch(() => undefined)
       if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      if ((sessionResult || turnResult) && matches?.total === 1) {
+        const [target] = matches.matches
+        const result = await readSessionResult(dshWeb, target.id, signal, turnResult).catch(() => ({ status: 'dsh_history_unavailable' }))
+        if (state.sessionId !== sessionId || consoleWorker.signal.aborted || stopRequested || latestTurnId !== user.id ||
+          !approvalRequests().some(item => item.id === event.id)) return
+        return returnToolResult(event.id, receipt, JSON.stringify({ session: target, ...result }), result.status === 'dsh_history_unavailable')
+      }
+      if ((sessionResult || turnResult) && matches) {
+        return returnToolResult(event.id, receipt, JSON.stringify({ status: matches.total ? 'multiple_matches' : 'no_match', ...matches }), false)
+      }
       return returnToolResult(event.id, receipt, JSON.stringify(matches || { status: 'dsh_catalog_unavailable' }), !matches)
     }
     const intent = emptyToolInput(event) && taskbookIntent(userText)
@@ -1234,9 +1627,21 @@ async function finishConsoleRequest() {
         total: current ? cloud.length : null, tasks: current ? cloud.slice(0, 15) : [] }), false)
       return
     }
-    const { tasks, followups, ...status } = fullTaskbook()
+    if (intent === 'waiting' || intent === 'running') {
+      await refreshTaskbookCloud().catch(() => {})
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(taskbookActivity(fullTaskbook(), intent)), false)
+    }
+    if (intent === 'completed_today' || intent === 'completed_recent') {
+      await refreshTaskbookCloud().catch(() => {})
+      if (stopRequested || latestTurnId !== user.id || !approvalRequests().some(item => item.id === event.id)) return
+      return returnToolResult(event.id, receipt, JSON.stringify(taskbookCompleted(fullTaskbook(), intent)), false)
+    }
+    const { tasks, followups, cloudFollowups, macRuns, cloudCompletions, dshCompletions, ...status } = fullTaskbook()
     const counts = Object.fromEntries(['dsh', 'qca'].map(provider => [provider, tasks.filter(task => task.provider === provider).length]))
-    const result = intent ? { ...status, total: tasks.length, counts, ...(intent === 'list' && { tasks: tasks.slice(0, 15), followups }) }
+    const result = intent ? { ...status, total: tasks.length, counts, macRunCount: macRuns.length,
+      ...(intent === 'list' && { tasks: tasks.slice(0, 15), followups: followups.slice(0, 15),
+        cloudFollowups: cloudFollowups.slice(0, 15), macRuns: macRuns.slice(0, 15) }) }
       : { status: 'explicit_taskbook_request_required' }
     await returnToolResult(event.id, receipt, JSON.stringify(result), !intent)
     return
@@ -1432,8 +1837,7 @@ async function latestDshStatus(checkedAt) {
   const end = laterEvents[endedAt]
   const lastEvent = end || laterEvents.at(-1)
   if (!/^[a-f0-9]{20}$/.test(receipt || '')) return { status: 'unverified', toolEventId: task.id }
-  const record = await readFile(resolve(dshRunDir, `${receipt}.json`), 'utf8')
-    .then(JSON.parse).catch(error => { if (error.code !== 'ENOENT') throw error })
+  const record = await readMacRun(receipt)
   if (record?.receipt !== receipt || record.qcaSessionId !== state.sessionId || record.eventId !== task.id) {
     return { status: 'unverified', receipt, toolEventId: task.id }
   }
@@ -1486,12 +1890,15 @@ async function watchConsole() {
         cloudConnection = 'connected'
         lastError = undefined
         retryDelay = 2_500
+        remindApprovals()
       })) {
         if (signal.aborted) return
         ingest(event)
+        if (event.type === 'user.message') publishTurnAvailability()
         if (event.type === 'session.updated' && !maintenanceRunning && !mutating) nextConfigurationCheck = 0
         if (event.type === 'session.status_idle' || event.type === 'user.custom_tool_result') {
           queueConsoleRequest()
+          remindApprovals()
         }
         if (phase === 'ended') return
       }
@@ -1507,6 +1914,45 @@ async function watchConsole() {
   }
 }
 
+let notifyApproval
+let wechat
+const pendingCards = () => cloudConnection === 'connected' && phase === 'approval' && !stopRequested
+  ? consoleApprovals().filter(card => !card.expired) : []
+function remindApprovals() {
+  if (!notifyApproval) return
+  const { sessionId } = state
+  const { signal } = consoleWorker
+  const pendingIds = () => state.sessionId === sessionId ? pendingCards().map(card => card.id) : []
+  void notifyApproval(sessionId, pendingIds, signal)?.catch(() => {
+    if (!signal.aborted) console.warn('Dot 审批提醒未确认送达。')
+  })
+}
+
+function pollWechatApproval() {
+  if (!wechat || mutating || !pendingCards().length) return
+  const { sessionId } = state
+  const { signal } = consoleWorker
+  const valid = id => {
+    const cards = pendingCards()
+    return state.sessionId === sessionId && cards.length === 1 && cards[0].id === id
+  }
+  void wechat.poll(sessionId, valid, async (id, choice, expiresAt) => {
+    if (mutating || signal.aborted || !valid(id)) return false
+    mutating = true
+    try {
+      await recordApproval({ id, choice }, { sessionId, expiresAt })
+      return true
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 409) return false
+      throw error
+    } finally {
+      mutating = false
+    }
+  }, signal).catch(() => {
+    if (!signal.aborted) console.warn('Dot 微信审批回复暂未确认。')
+  })
+}
+
 function startBridgeHeartbeat() {
   const publish = bridgeHeartbeat(client)
   let lastError
@@ -1514,8 +1960,13 @@ function startBridgeHeartbeat() {
   let publishedTaskbookSession
   let nextTaskbookPublish = 0
   let publishingTaskbook
+  let publishingHeartbeat
   const tick = () => {
+    publishTurnAvailability()
+    remindApprovals()
+    pollWechatApproval()
     runQueuedMaintenance()
+    recoverMaintenanceRequest()
     checkManagedConfiguration()
     syncHistoryEntries()
     const id = state.sessionId
@@ -1523,7 +1974,7 @@ function startBridgeHeartbeat() {
       cloudConnection === 'connected' && phase !== 'ended'
     const now = Date.now()
     if (connected() && !publishingTaskbook && (publishedTaskbookSession !== id || now >= nextTaskbookPublish)) {
-      const record = offlineTaskbook(taskbook, id, earlierDotSessions(), now)
+      const record = offlineTaskbook(taskbook, id, earlierDotSessions(), now, activeMacRun())
       if (record.mac.counts || record.qca.current !== null) {
         publishedTaskbookSession = id
         nextTaskbookPublish = now + 120_000
@@ -1544,15 +1995,41 @@ function startBridgeHeartbeat() {
           .catch(() => {}).finally(() => { publishingMaintenance = undefined })
       }
     }
-    void publish(id, connected).then(() => { lastError = undefined }).catch(error => {
-      const detail = error instanceof QcaError ? 'HTTP ' + error.status : error.code || error.name
-      if (detail !== lastError) console.error('Dot 在线状态 · ' + detail)
-      lastError = detail
-    })
+    if (connected() && !publishingHeartbeat) {
+      publishingHeartbeat = dshCliAvailable(serviceSignal.signal)
+        .then(dshCli => publish(id, connected, Date.now(), { dshCli, dshWeb: dshWebAvailable }))
+        .then(() => { lastError = undefined }).catch(error => {
+          const detail = error instanceof QcaError ? 'HTTP ' + error.status : error.code || error.name
+          if (detail !== lastError) console.error('Dot 在线状态 · ' + detail)
+          lastError = detail
+        }).finally(() => { publishingHeartbeat = undefined })
+    }
   }
   const timer = setInterval(tick, 10_000)
   timer.unref()
   serviceSignal.signal.addEventListener('abort', () => clearInterval(timer), { once: true })
+}
+
+const mountedAvailability = consoleMode && turnAvailability({
+  client, file: resolve(stateDir, 'availability-files.json'), save: writeJson,
+})
+let checkingTurnAvailability
+let lastAvailabilityError
+function publishTurnAvailability() {
+  if (checkingTurnAvailability || cloudConnection !== 'connected' || serviceSignal.signal.aborted) return
+  const { signal } = serviceSignal
+  const current = turn => !signal.aborted && cloudConnection === 'connected' && state.sessionId === turn.sessionId &&
+    latestTurnId === turn.id && phase === 'running' && !stopRequested
+  const latest = events.get(latestTurnId)
+  const turn = latest && { id: latest.id, processed_at: latest.processed_at, sessionId: state.sessionId }
+  const capabilities = async signal => ({ dshCli: await dshCliAvailable(signal), dshWeb: dshWebAvailable })
+  checkingTurnAvailability = mountedAvailability(turn, capabilities, current, signal)
+    .then(() => { lastAvailabilityError = undefined })
+    .catch(error => {
+      const detail = error instanceof QcaError ? 'HTTP ' + error.status : error.code || error.name
+      if (!signal.aborted && detail !== lastAvailabilityError) console.warn('Dot 本轮在线状态 · ' + detail)
+      lastAvailabilityError = detail
+    }).finally(() => { checkingTurnAvailability = undefined })
 }
 
 async function readJson(req, limit = 20_000) {
@@ -1574,6 +2051,8 @@ const assets = new Map([
   ['/', ['index.html', 'text/html']],
   ['/app.js', ['app.js', 'text/javascript']],
   ['/styles.css', ['styles.css', 'text/css']],
+  ['/dot-planet.png', ['dot-planet.png', 'image/png']],
+  ['/planet.js', ['planet.js', 'text/javascript']],
   ['/markdown.js', ['markdown.js', 'text/javascript']],
   ['/vendor/markdown-it.mjs', ['node_modules/markdown-it/dist/browser/markdown-it.esm.min.mjs', 'text/javascript']],
 ])
@@ -1634,7 +2113,8 @@ async function handleRequest(req, res) {
     const asset = assets.get(path)
     if (req.method === 'GET' && asset) {
       const content = await readFile(resolve(root, asset[0]))
-      res.writeHead(200, { 'Content-Type': `${asset[1]}; charset=utf-8` })
+      const contentType = asset[1].startsWith('text/') ? `${asset[1]}; charset=utf-8` : asset[1]
+      res.writeHead(200, { 'Content-Type': contentType })
       return res.end(content)
     }
     if (req.method === 'GET' && path === '/api/state') {
@@ -1653,7 +2133,12 @@ async function handleRequest(req, res) {
       if (req.headers['x-requested-with'] !== 'XMLHttpRequest' || (req.headers.origin && req.headers.origin !== origin)) {
         throw new HttpError(403, '请从本机 Dot 面板查看记忆。')
       }
-      return json(200, path === '/api/taskbook' ? fullTaskbook() : { entries: [...(await readMemory(memoryFile)).values()] })
+      if (path === '/api/taskbook') {
+        const { cloudCompletions, dshCompletions, ...book } = fullTaskbook()
+        return json(200, { ...book, followups: book.followups.slice(0, 15), cloudFollowups: book.cloudFollowups.slice(0, 15),
+          macRuns: book.macRuns.slice(0, 15) })
+      }
+      return json(200, { entries: [...(await readMemory(memoryFile)).values()] })
     }
     const action = req.method === 'POST' && postRoutes.get(path)
     if (!action) throw new HttpError(404, '页面不存在。')
@@ -1684,9 +2169,37 @@ async function handleRequest(req, res) {
 }
 const server = createServer(handleRequest)
 const remoteServer = remotePort ? createServer(handleRequest) : undefined
+if (consoleMode) await restoreMacRuns()
 server.listen(port, '127.0.0.1', () => console.log(`${dotName} · ${mock ? '模拟网关' : site} · http://127.0.0.1:${port}`))
 remoteServer?.listen(remotePort, '127.0.0.1', () => console.log(`${dotName} · HTTPS 转发端口 ${remotePort}`))
 if (consoleMode) {
+  const scheduleId = process.env.DOT_QCA_APPROVAL_SCHEDULE_ID
+  if (scheduleId || process.env.DOT_SERVERCHAN_SENDKEY) {
+    try {
+      const forward = scheduleId && qcaClient(sites[site].replace(/\/cloud$/, '/forward'), token)
+      const deliver = scheduleId
+        ? qcaApprovalSender(forward, scheduleId)
+        : serverChanApprovalSender(process.env.DOT_SERVERCHAN_SENDKEY, site)
+      const pairingId = process.env.DOT_QCA_WECHAT_PAIRING_ID
+      if (scheduleId && pairingId) wechat = wechatApproval({ client: forward, pairingId, scheduleId,
+        file: resolve(stateDir, 'wechat-approval.json'), save: writeJson, deliver })
+      const send = wechat ? (signal, key, ids, sessionId) => {
+        const cards = pendingCards()
+        const card = cards.length === 1 && ids.includes(cards[0].id) ? cards[0] : undefined
+        const current = () => {
+          const pending = pendingCards()
+          return state.sessionId === sessionId && (card
+            ? pending.length === 1 && pending[0].id === card.id
+            : pending.some(item => ids.includes(item.id)))
+        }
+        return wechat.offer(sessionId, card, key, current, signal)
+      } : deliver
+      notifyApproval = approvalNotifier({ file: resolve(stateDir, 'approval-notifications.json'),
+        save: writeJson, send })
+    } catch {
+      console.warn('Dot 审批提醒未启用，请检查通知配置。')
+    }
+  }
   void watchConsole()
   startBridgeHeartbeat()
   if (!process.env.DOT_DISABLE_THREAD_POLL) {
@@ -1696,9 +2209,21 @@ if (consoleMode) {
       if (readingDsh) return
       readingDsh = true
       const signal = AbortSignal.any([serviceSignal.signal, AbortSignal.timeout(8500)])
-      void dshWeb.list(signal).then(async report => {
+      void dshWeb.list(signal, Object.values(taskbook.localTracking)).then(report => {
+        dshWebAvailable = true
+        return report
+      }, () => { dshWebAvailable = false }).then(async report => {
+        if (!report) return
         await refreshDshFollowups(signal)
-        if (taskbook.acceptLocal(report)) await taskbook.persist()
+        if (!taskbook.acceptLocal(report)) return
+        const now = Date.now()
+        const scanSignal = AbortSignal.any([serviceSignal.signal, AbortSignal.timeout(8500)])
+        await Promise.allSettled(taskbook.historyCandidates(report.rows, now).map(async row => {
+          taskbook.dshHistoryAttempts.set(row.id, now)
+          const history = await scanDshCompletions(dshWeb, row, taskbook.dshHistory[row.id], now - recentWindow, scanSignal)
+          taskbook.acceptDshHistory(row, history)
+        }))
+        await taskbook.persist()
       }).catch(() => {}).finally(() => { readingDsh = false })
     }
     void poll()

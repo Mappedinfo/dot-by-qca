@@ -24,6 +24,17 @@ function dshEnvironment() {
   return env
 }
 
+export async function dshCliAvailable(signal) {
+  try {
+    const { stdout } = await run(dshExecutable(), ['--version'], {
+      cwd: homedir(), env: dshEnvironment(), signal, timeout: 4000, maxBuffer: 1024,
+    })
+    return /^\d+\.\d+\.\d+\b/.test(stdout.trim())
+  } catch {
+    return false
+  }
+}
+
 export async function runDsh(task, cwd, signal, workspace = false) {
   const args = ['headless', '--patch', patch]
   if (workspace) args.push('--patch', workspacePatch)

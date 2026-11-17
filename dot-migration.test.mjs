@@ -15,6 +15,9 @@ const source = {
 
 test('migration preserves pinned QCA child agents without copying response-only fields', () => {
   const session = structuredClone(source)
+  const report = { type: 'file', file_id: 'file_report', mount_path: '/data/report.md' }
+  session.resources.push(report,
+    { type: 'file', file_id: 'file_online', mount_path: '/mnt/session/uploads/dot-bridge-live-sess_source-evt_test.json' })
   session.agent.multiagent = { type: 'coordinator', agents: [
     { type: 'agent', id: 'agent_child', version: 3, name: 'Cloud worker' },
   ] }
@@ -22,6 +25,7 @@ test('migration preserves pinned QCA child agents without copying response-only 
   assert.deepEqual(job.agentConfig.multiagent, { type: 'coordinator', agents: [
     { type: 'agent', id: 'agent_child', version: 3 },
   ] })
+  assert.deepEqual(job.resources, [...source.resources, report])
 })
 
 test('a search worker must be able to use search and fetch without blocking for approval', () => {

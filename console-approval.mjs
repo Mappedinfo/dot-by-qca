@@ -75,6 +75,12 @@ export function requestedMacClock(events, target, decisions) {
   if (text && clockRequest.test(text)) return exactDshTask("/bin/date '+%Y-%m-%d %H:%M:%S %Z (UTC%z)'")
 }
 
+export function misplacedMacClockProbe(events, target, decisions) {
+  return target.type === 'agent.tool_use' && target.name === 'Bash' && target.evaluated_permission === 'ask' &&
+    typeof target.input?.command === 'string' && /^(?:\/bin\/)?date[ \t]+-u[ \t]+\+%s$/u.test(target.input.command.trim()) &&
+    Boolean(requestedMacClock(events, target, decisions))
+}
+
 function directUserText(events, target, decisions) {
   let message
   let attempted = false

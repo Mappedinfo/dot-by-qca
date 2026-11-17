@@ -2,10 +2,11 @@ import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import { taskRows, unarchivedSessions } from './dsh-panel/task-rows.js'
+import { observedTurnEnd } from './dot-dsh-followup.mjs'
 
 const run = promisify(execFile)
 
-export function webTaskSource() {
+export function webTaskSource({ internalWorkDir } = {}) {
   const source = '00000000-0000-4000-8000-000000000001'
   const origin = 'http://127.0.0.1:3080'
   const script = process.env.DOT_DSH_WEB_STATUS || 'dsh-web.sh'
@@ -39,9 +40,28 @@ export function webTaskSource() {
     return message.result.value
   }
 
-  async function list(signal) {
+  async function history(sessionId, signal, beforeSeq, throughSeq) {
+    return rpc('session/events', { request: {
+      address: { kind: 'session', sessionId }, maxMessages: 16, beforeSeq, throughSeq,
+    } }, signal)
+  }
+
+  async function list(signal, tracked = []) {
     const { items, archived } = await catalog(signal)
-    return { source, ...await taskRows(items, sessionId => rpc('session/state', { request: { sessionId } }, signal), archived) }
+    const previous = new Map(tracked.map(row => [row.id, row]))
+    const report = await taskRows(items, sessionId => rpc('session/state', { request: { sessionId } }, signal), archived, previous)
+    const recovering = report.rows.filter(row => row.status === 'unknown' && Number.isSafeInteger(row.cursor))
+    await Promise.all(recovering.map(async row => {
+      try {
+        const page = await history(row.id, signal, undefined, row.cursor)
+        const ended = observedTurnEnd(page.records, previous.get(row.id), { includeTime: true })
+        if (ended) Object.assign(row, ended, { observed: true })
+      } catch {
+        // Keep the last active observation until a full observation succeeds.
+      }
+    }))
+    const historyExcluded = internalWorkDir ? items.filter(item => item.cwd === internalWorkDir).map(item => item.sessionId) : []
+    return { source, ...report, eligibleIds: new Set(unarchivedSessions(items, archived).map(item => item.sessionId)), historyExcluded }
   }
 
   async function archivedSessions(signal) {
@@ -92,11 +112,10 @@ export function webTaskSource() {
     list,
     eligibleSessions,
     state: (sessionId, signal) => rpc('session/state', { request: { sessionId } }, signal),
+    cancel: (sessionId, signal) => rpc('session/cancel', { request: { sessionId } }, signal),
     prompt: (sessionId, requestId, task, signal) => rpc('session/prompt', { request: {
       sessionId, requestId, mode: 'queue', content: [{ type: 'text', text: task }],
     } }, signal),
-    history: (sessionId, signal, beforeSeq) => rpc('session/events', { request: {
-      address: { kind: 'session', sessionId }, maxMessages: 16, beforeSeq,
-    } }, signal),
+    history,
   }
 }
