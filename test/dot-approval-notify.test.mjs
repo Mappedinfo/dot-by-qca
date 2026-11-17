@@ -4,8 +4,8 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { approvalNotifier, qcaApprovalSender, serverChanApprovalSender } from './dot-approval-notify.mjs'
-import { qcaClient } from './qca.mjs'
+import { approvalNotifier, qcaApprovalSender, serverChanApprovalSender } from '../src/dot-approval-notify.mjs'
+import { qcaClient } from '../src/qca.mjs'
 
 test('a current card is reminded once across reconnects and a service restart', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'dot-approval-test-'))

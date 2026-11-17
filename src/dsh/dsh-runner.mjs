@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { Readable, Writable } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ClientSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
-import { taskVerdicts } from './task-review.mjs'
+import { taskVerdicts } from '../task-review.mjs'
 
 const run = promisify(execFile)
 const patch = fileURLToPath(new URL('./dsh-headless.patch.yml', import.meta.url))

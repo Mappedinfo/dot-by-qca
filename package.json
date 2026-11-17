@@ -2,6 +2,9 @@
   "name": "dot-by-qca",
   "type": "module",
   "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
     "markdown-it": "15.0.3"

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { consoleConfigurationPatch, latestMaintenanceRequest, maintenanceIntent } from './dot-maintenance.mjs'
-import { CLOUD_TOOLS, macMarkerTool } from './qca.mjs'
+import { consoleConfigurationPatch, latestMaintenanceRequest, maintenanceIntent } from '../src/dot-maintenance.mjs'
+import { CLOUD_TOOLS, macMarkerTool } from '../src/qca.mjs'
 
 test('requires a direct maintenance request and does not treat a question as permission to update', () => {
   assert.equal(maintenanceIntent('检查并修复 Dot 配置'), 'repair')

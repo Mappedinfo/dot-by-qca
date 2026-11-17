@@ -3,8 +3,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { bridgeHeartbeat, bridgeLeaseMs, consoleSystem, isBridgeFile, migrateConsoleSystem, turnAvailability } from './dot-bridge.mjs'
-import { QcaError } from './qca.mjs'
+import { bridgeHeartbeat, bridgeLeaseMs, consoleSystem, isBridgeFile, migrateConsoleSystem, turnAvailability } from '../src/dot-bridge.mjs'
+import { QcaError } from '../src/qca.mjs'
 
 test('renews only for a connected session and replaces the previous owner on cutover', async () => {
   const calls = []

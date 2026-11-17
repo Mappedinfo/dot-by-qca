@@ -7,9 +7,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
-import { blockedTerminalCommand } from './task-review.mjs'
-import { approvedDshTask, directlyRequestedDshTask, questionAnswer, requestedMacClock } from './console-approval.mjs'
-import { CONSOLE_QUESTION, DOT_DSH_FOLLOWUP_TOOL, DOT_TASKBOOK_TOOL, DSH_CLOCK_TOOL, DSH_COMMAND_HEADER, DSH_COMMAND_PREFIX, DSH_CONTINUE_TOOL, DSH_DIRECT_TOOL, DSH_EXACT_COMMAND_HEADER, DSH_EXACT_COMMAND_PREFIX, DSH_REVIEW_TOOL, DSH_TOOL } from './qca.mjs'
+import { blockedTerminalCommand } from '../src/task-review.mjs'
+import { approvedDshTask, directlyRequestedDshTask, questionAnswer, requestedMacClock } from '../src/console-approval.mjs'
+import { CONSOLE_QUESTION, DOT_DSH_FOLLOWUP_TOOL, DOT_TASKBOOK_TOOL, DSH_CLOCK_TOOL, DSH_COMMAND_HEADER, DSH_COMMAND_PREFIX, DSH_CONTINUE_TOOL, DSH_DIRECT_TOOL, DSH_EXACT_COMMAND_HEADER, DSH_EXACT_COMMAND_PREFIX, DSH_REVIEW_TOOL, DSH_TOOL } from '../src/qca.mjs'
 
 const sessionId = 'sess_recovery_fixture'
 const origin = 'evt_start'
@@ -106,10 +106,11 @@ async function prepareConsole(t, decisions) {
   t.after(() => rm(root, { recursive: true, force: true }))
   const stateDir = join(root, '.dot-state', 'cn')
   await mkdir(stateDir, { recursive: true })
+  const fixturePaths = ['server.mjs', 'src', 'web', 'dsh-panel']
+  await Promise.all(fixturePaths.map(path => cp(new URL('../' + path, import.meta.url), join(root, path), { recursive: true })))
   await Promise.all([
-    ...['server.mjs', 'qca.mjs', 'console-approval.mjs', 'task-review.mjs', 'dot-archive.mjs', 'dot-memory.mjs', 'dot-migration.mjs', 'dot-taskbook.mjs', 'dot-dsh-followup.mjs', 'dot-cloud-followup.mjs', 'dot-bridge.mjs', 'dot-maintenance.mjs', 'dot-entry.mjs', 'dot-approval-notify.mjs', 'dot-wechat-approval.mjs', 'dsh-task-source.mjs', 'dsh-panel'].map(file => cp(new URL(file, import.meta.url), join(root, file), { recursive: true })),
     writeFile(join(stateDir, 'session.json'), JSON.stringify({ sessionId, decisions })),
-    writeFile(join(root, 'dsh-runner.mjs'), "export async function dshCliAvailable() { return true }\nexport function reviewDshTask() { return { verdict: 'allow', reason: 'fixture' } }\nexport function runDsh() { process.exit(90) }\nexport function runDshCommandTask() { process.exit(91) }\n"),
+    writeFile(join(root, 'src', 'dsh', 'dsh-runner.mjs'), "export async function dshCliAvailable() { return true }\nexport function reviewDshTask() { return { verdict: 'allow', reason: 'fixture' } }\nexport function runDsh() { process.exit(90) }\nexport function runDshCommandTask() { process.exit(91) }\n"),
   ])
   return root
 }
@@ -336,7 +337,7 @@ test('the same Dot session can find, queue, read and stop a DSH conversation out
   const target = 'session-50000000-0000-4000-8000-000000000001'
   const later = 'session-50000000-0000-4000-8000-000000000002'
   const fixture = { sessionId: target, updatedAt: 1, projections: { values: { title: '合成旧会话' } } }
-  await writeFile(join(root, 'dsh-task-source.mjs'), `
+  await writeFile(join(root, 'src', 'dsh', 'dsh-task-source.mjs'), `
     const target = ${JSON.stringify(fixture)}
     let requestId
     let stopped = false
@@ -613,7 +614,7 @@ test('a late approval from the Qoder console returns expiry without running the 
         audit: { approvedCommands: 0, rejectedCommands: 0, commandResults: [] },
       })
     }`
-  await writeFile(join(root, 'dsh-runner.mjs'), runner)
+  await writeFile(join(root, 'src', 'dsh', 'dsh-runner.mjs'), runner)
   const history = pendingEvents(origin)
   const posts = []
   let stream
@@ -693,7 +694,7 @@ test('one approved card permits the exact command once and never asks for a seco
       return { sessionId: 'fixture', approvedCommands: 1, rejectedCommands: 2,
         commandResults: [{ command: 'printf one-card', status: 'completed', output: 'one-card' }] }
     }`
-  await writeFile(join(root, 'dsh-runner.mjs'), runner)
+  await writeFile(join(root, 'src', 'dsh', 'dsh-runner.mjs'), runner)
   const history = pendingEvents(origin)
   history[0].content = [{ type: 'text', text: `让 D 在 Mac 执行 \`${command}\`，把输出发回来` }]
   Object.assign(history[1].input.questions[0], { header: DSH_EXACT_COMMAND_HEADER, question })
@@ -837,7 +838,7 @@ test('Mac blocks recursive deletion and destructive disk operations before termi
 
 test('Mac veto blocks a different execution tool in the same Qoder turn', async t => {
   const root = await prepareConsole(t, {})
-  await writeFile(join(root, 'dsh-runner.mjs'), `
+  await writeFile(join(root, 'src', 'dsh', 'dsh-runner.mjs'), `
     export async function dshCliAvailable() { return true }
     export function reviewDshTask() { return { verdict: 'deny', reason: 'fixture veto' } }
     export function runDsh() { process.exit(90) }

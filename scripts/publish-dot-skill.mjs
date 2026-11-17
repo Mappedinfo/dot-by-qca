@@ -5,16 +5,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadEnvFile } from 'node:process'
 import { promisify } from 'node:util'
-import { configureQcaProxy } from './qca.mjs'
+import { fileURLToPath } from 'node:url'
+import { configureQcaProxy } from '../src/qca.mjs'
 
-loadEnvFile('.env')
+const root = fileURLToPath(new URL('../', import.meta.url))
+loadEnvFile(join(root, '.env'))
 configureQcaProxy()
 const site = process.env.QODER_SITE || 'global'
 const token = process.env.QODER_PAT || process.env.QODER_ACCESS_TOKEN
 if (!token || !['global', 'cn'].includes(site)) throw new Error('缺少 QCA 站点配置。')
 const base = site === 'cn' ? 'https://api.qoder.com.cn' : 'https://api.qoder.com'
-const manifest = join('.dot-state', site, 'consultation-skill.json')
-const skillDir = 'skills'
+const manifest = join(root, '.dot-state', site, 'consultation-skill.json')
+const skillDir = join(root, 'skills')
 const name = 'dot-task-consultation'
 const hash = createHash('sha256').update(await readFile(join(skillDir, name, 'SKILL.md'))).digest('hex')
 const previous = await readFile(manifest, 'utf8').then(JSON.parse).catch(error => {

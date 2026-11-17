@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { wechatApproval, wechatChoice } from './dot-wechat-approval.mjs'
+import { wechatApproval, wechatChoice } from '../src/dot-wechat-approval.mjs'
 
 const sender = 'fixture_sender'
 const sessionId = 'sess_main'

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { dotSessionUrl, entryTitle } from './dot-entry.mjs'
+import { dotSessionUrl, entryTitle } from '../src/dot-entry.mjs'
 
 test('the same historical link points to the latest primary and can be restored', () => {
   const source = { id: 'sess_A', title: 'Qoder Dot', agent: { system: 'Original configuration', tools: [{ type: 'custom', name: 'example' }] } }

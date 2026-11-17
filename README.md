@@ -1,14 +1,14 @@
-<img src="dot-planet.png" width="72" align="right" alt="Dot 星球">
+<img src="web/assets/dot-planet.png" width="72" align="right" alt="Dot 星球">
 
 # Dot by QCA
-
-简体中文 · [English](README.en.md)
 
 [![macOS](https://img.shields.io/badge/platform-macOS-27343C?style=flat-square&logo=apple)](docs/user/getting-started.md)
 [![Node.js 24.14+](https://img.shields.io/badge/Node.js-24.14%2B-40784D?style=flat-square&logo=nodedotjs&logoColor=white)](docs/development/local-development.md)
 [![GitHub Stars](https://img.shields.io/github/stars/Mappedinfo/dot-by-qca?style=flat-square)](https://github.com/Mappedinfo/dot-by-qca)
 [![GitHub Issues](https://img.shields.io/github/issues/Mappedinfo/dot-by-qca?style=flat-square)](https://github.com/Mappedinfo/dot-by-qca/issues)
 [![最近提交](https://img.shields.io/github/last-commit/Mappedinfo/dot-by-qca/main?style=flat-square)](https://github.com/Mappedinfo/dot-by-qca/commits/main/)
+
+简体中文 · [English](README.en.md)
 
 Dot 把 Mac 上的 DeepSeek Harness（DSH）和手机上的 Qoder 网页接到同一个 Qoder Cloud Agents（QCA）会话。
 

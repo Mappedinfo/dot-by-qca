@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createMigration, dotWorkerReady, migrationOptions, runMigration } from './dot-migration.mjs'
+import { createMigration, dotWorkerReady, migrationOptions, runMigration } from '../src/dot-migration.mjs'
 
 const source = {
   id: 'sess_source',

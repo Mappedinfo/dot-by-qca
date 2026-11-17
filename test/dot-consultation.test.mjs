@@ -3,8 +3,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { archiveCutoff, archiveDateReply, archiveRequest, previewArchive, seedArchivePreview } from './dot-archive.mjs'
-import { applyMemory, memoryIntent, memoryMarkdown, readMemory } from './dot-memory.mjs'
+import { archiveCutoff, archiveDateReply, archiveRequest, previewArchive, seedArchivePreview } from '../src/dot-archive.mjs'
+import { applyMemory, memoryIntent, memoryMarkdown, readMemory } from '../src/dot-memory.mjs'
 
 test('archive preview leaves conflicts in place and applies a stated local calendar cutoff', async t => {
   const workspace = await mkdtemp(join(tmpdir(), 'dot-preview-'))

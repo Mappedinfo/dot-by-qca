@@ -1,4 +1,4 @@
-import { blockedTerminalCommand } from './task-review.mjs'
+import { blockedTerminalCommand } from '../task-review.mjs'
 
 export const inject = ['tools']
 

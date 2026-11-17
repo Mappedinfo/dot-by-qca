@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
-import { taskRows, unarchivedSessions } from './dsh-panel/task-rows.js'
-import { observedTurnEnd } from './dot-dsh-followup.mjs'
+import { taskRows, unarchivedSessions } from '../../dsh-panel/task-rows.js'
+import { observedTurnEnd } from '../dot-dsh-followup.mjs'
 
 const run = promisify(execFile)
 

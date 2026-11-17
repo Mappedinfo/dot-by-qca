@@ -23,14 +23,17 @@ Mac 桥接定期更新在线状态，标明到期时间和 CLI、Web 能力。�
 
 ## 从哪里读代码
 
+根目录的 [server.mjs](../../server.mjs) 是启动入口。实现放在 `src/`，前端和静态资源在 `web/`，测试在 `test/`，维护脚本在 `scripts/`。
+
 | 模块 | 入口 |
 | --- | --- |
-| 本机服务、事件投影、路由 | [server.mjs](../../server.mjs) |
-| QCA 接口、工具定义和会话提示词 | [qca.mjs](../../qca.mjs) |
-| Mac 审批核对、DSH 执行 | [console-approval.mjs](../../console-approval.mjs)、[dsh-runner.mjs](../../dsh-runner.mjs) |
-| 任务本和在线状态 | [dot-taskbook.mjs](../../dot-taskbook.mjs)、[dot-bridge.mjs](../../dot-bridge.mjs) |
-| 迁移和维护 | [dot-migration.mjs](../../dot-migration.mjs)、[dot-maintenance.mjs](../../dot-maintenance.mjs) |
-| Web 界面、Markdown 和星球外观 | [index.html](../../index.html)、[app.js](../../app.js)、[markdown.js](../../markdown.js)、[planet.js](../../planet.js) |
-| DSH 插件 | [dsh-panel](../../dsh-panel/) |
+| 本机服务、事件投影、路由 | [server.mjs](../../src/server.mjs) |
+| QCA 接口、工具定义和会话提示词 | [qca.mjs](../../src/qca.mjs) |
+| Mac 审批核对、DSH 执行 | [console-approval.mjs](../../src/console-approval.mjs)、[dsh-runner.mjs](../../src/dsh/dsh-runner.mjs) |
+| 任务本和在线状态 | [dot-taskbook.mjs](../../src/dot-taskbook.mjs)、[dot-bridge.mjs](../../src/dot-bridge.mjs) |
+| 迁移和维护 | [dot-migration.mjs](../../src/dot-migration.mjs)、[dot-maintenance.mjs](../../src/dot-maintenance.mjs) |
+| Web 界面、Markdown 和星球外观 | [index.html](../../web/index.html)、[app.js](../../web/app.js)、[markdown.js](../../web/markdown.js)、[planet.js](../../web/planet.js) |
+| DSH 插件和运行配置 | [dsh-panel](../../dsh-panel/)、[src/dsh](../../src/dsh/) |
+| 发布协商技能 | [publish-dot-skill.mjs](../../scripts/publish-dot-skill.mjs) |
 
 真实配置和状态分别保存在本机 `.env` 与 `.dot-state/<站点>/`。公开复现使用 `.env.example`、模拟网关和测试夹具，保留账号及数据边界。

@@ -26,12 +26,12 @@ node server.mjs --mock
 ## 运行测试
 
 ```sh
-node --test
-node --check app.js
-node --check planet.js
+npm test
+node --check web/app.js
+node --check web/planet.js
 ```
 
-修改审批、断线或重启恢复逻辑时，可先运行 `node --test command-recovery.test.mjs`。任务本相关改动可先运行 `node --test dot-taskbook.test.mjs`。测试使用模拟事件和临时目录，可以在空白配置下运行。
+修改审批、断线或重启恢复逻辑时，可先运行 `node --test test/command-recovery.test.mjs`。任务本相关改动可先运行 `node --test test/dot-taskbook.test.mjs`。测试使用模拟事件和临时目录，可以在空白配置下运行。启动测试会核对根目录入口、静态资源和状态保存位置。
 
 要复现归档预演，可运行 `node server.mjs --seed-archive-preview` 准备合成样本，再在测试会话说「让 D 整理一下 Dot 工作区的旧报告，只预演」。查看[协商技能](../../skills/dot-task-consultation/SKILL.md)中的预演约定。
 
